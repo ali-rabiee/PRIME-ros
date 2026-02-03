@@ -1,0 +1,49 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Arguments -->
+  <arg name="robot_type" default="j2n6s300"/>
+  <arg name="use_sim" default="false"/>
+  <arg name="llm_endpoint" default="http://localhost:11434/api/generate"/>
+  
+  <!-- Load parameters -->
+  <rosparam file="$(find prime_ros)/config/prime_params.yaml" command="load"/>
+  <rosparam file="$(find prime_ros)/config/llm_prompts.yaml" command="load" ns="llm"/>
+  
+  <!-- Override robot type if specified -->
+  <param name="robot/type" value="$(arg robot_type)"/>
+  <param name="llm/endpoint" value="$(arg llm_endpoint)"/>
+  
+  <!-- Joystick Monitor Node -->
+  <!-- This node reads joystick state from Kinova API and publishes it -->
+  <node pkg="prime_ros" type="joystick_monitor.py" name="joystick_monitor" output="screen">
+    <param name="robot_type" value="$(arg robot_type)"/>
+    <param name="publish_rate" value="20.0"/>
+  </node>
+  
+  <!-- State Builder Node -->
+  <!-- Builds symbolic state from perception and robot state -->
+  <node pkg="prime_ros" type="state_builder.py" name="state_builder" output="screen">
+    <param name="update_rate" value="10.0"/>
+  </node>
+  
+  <!-- LLM Executive Node -->
+  <!-- Runs the Qwen 2.5 model for decision making -->
+  <node pkg="prime_ros" type="llm_executive.py" name="llm_executive" output="screen">
+    <param name="model" value="qwen2.5"/>
+  </node>
+  
+  <!-- Tool Executor Node -->
+  <!-- Executes tool calls using MoveIt -->
+  <node pkg="prime_ros" type="tool_executor.py" name="tool_executor" output="screen">
+    <param name="robot_type" value="$(arg robot_type)"/>
+  </node>
+  
+  <!-- User Interface Node -->
+  <!-- Handles user queries and responses -->
+  <node pkg="prime_ros" type="user_interface.py" name="user_interface" output="screen"/>
+  
+  <!-- Main PRIME Node -->
+  <!-- Coordinates all components -->
+  <node pkg="prime_ros" type="prime_node.py" name="prime_executive" output="screen"/>
+
+</launch>

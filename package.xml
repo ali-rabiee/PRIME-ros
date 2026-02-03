@@ -1,0 +1,44 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>prime_ros</name>
+  <version>1.0.0</version>
+  <description>
+    PRIME (Planning and Reasoning with Interactive Minimal-input Memory-Enhanced Executive)
+    An LLM-based shared autonomy system for robotic manipulation with minimal user input.
+  </description>
+
+  <maintainer email="user@example.com">TNLAB</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  
+  <!-- Build dependencies -->
+  <build_depend>message_generation</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>geometry_msgs</build_depend>
+  <build_depend>sensor_msgs</build_depend>
+  <build_depend>kinova_msgs</build_depend>
+  <build_depend>rospy</build_depend>
+  <build_depend>roscpp</build_depend>
+  <build_depend>actionlib</build_depend>
+  <build_depend>actionlib_msgs</build_depend>
+  
+  <!-- Runtime dependencies -->
+  <exec_depend>message_runtime</exec_depend>
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>roscpp</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>kinova_msgs</exec_depend>
+  <exec_depend>kinova_driver</exec_depend>
+  <exec_depend>moveit_ros_planning_interface</exec_depend>
+  <exec_depend>moveit_commander</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>tf2_geometry_msgs</exec_depend>
+  <exec_depend>actionlib</exec_depend>
+  <exec_depend>actionlib_msgs</exec_depend>
+
+  <export>
+  </export>
+</package>

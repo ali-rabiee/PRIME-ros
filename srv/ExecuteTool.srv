@@ -1,0 +1,4 @@
+# Execute a tool call
+ToolCall tool_call
+---
+ToolResult result

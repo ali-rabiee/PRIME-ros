@@ -1,0 +1,11 @@
+# PRIME ROS Dependencies
+
+# LLM API client
+requests>=2.25.0
+
+# Numerical computing
+numpy>=1.19.0
+
+# For future enhancements
+# scipy>=1.5.0
+# opencv-python>=4.5.0

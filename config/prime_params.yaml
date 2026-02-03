@@ -1,0 +1,76 @@
+# PRIME System Parameters
+
+# Robot configuration
+robot:
+  type: "j2n6s300"  # Kinova Jaco2 6-DOF
+  driver_prefix: "/j2n6s300_driver"
+  
+# Workspace grid configuration (3x3 as per paper)
+workspace:
+  grid_rows: 3
+  grid_cols: 3
+  # Workspace bounds in robot base frame (meters)
+  x_min: 0.2
+  x_max: 0.7
+  y_min: -0.4
+  y_max: 0.4
+  z_min: 0.0
+  z_max: 0.5
+
+# State builder parameters
+state_builder:
+  gripper_history_length: 10  # Number of timesteps to keep
+  update_rate: 10.0  # Hz
+  position_threshold: 0.02  # meters, minimum movement to update history
+
+# Candidate selection parameters
+candidates:
+  # Nearby threshold for candidate initialization
+  neighbor_threshold: 1  # grid cells
+  # Motion direction threshold for candidate inclusion
+  direction_threshold: 0.3  # radians
+
+# LLM configuration
+llm:
+  model: "qwen2.5"
+  endpoint: "http://localhost:11434/api/generate"  # Ollama default
+  temperature: 0.3
+  max_tokens: 500
+  timeout: 30.0  # seconds
+
+# User interface configuration
+ui:
+  query_timeout: 30.0  # seconds
+  # Button mapping for Kinova joystick (adjust based on your setup)
+  button_yes: 0
+  button_no: 1
+  button_option_1: 2
+  button_option_2: 3
+  button_option_3: 4
+  button_option_4: 5
+  button_option_5: 6
+
+# Tool execution parameters
+tools:
+  approach:
+    pre_grasp_distance: 0.10  # meters above object
+    approach_speed: 0.1  # m/s
+  align:
+    tolerance: 0.1  # radians
+  grasp:
+    finger_close_position: 5000  # Kinova units (0-6800)
+    finger_open_position: 0
+
+# Memory configuration
+memory:
+  max_dialog_history: 20
+  max_tool_history: 10
+
+# Topics
+topics:
+  camera_color: "/camera/color/image_raw"
+  camera_depth: "/camera/aligned_depth_to_color/image_raw"
+  yolo_detections: "/yolo/image_with_bboxes"
+  tool_pose: "/j2n6s300_driver/out/tool_pose"
+  finger_position: "/j2n6s300_driver/out/finger_position"
+  joint_state: "/j2n6s300_driver/out/joint_state"

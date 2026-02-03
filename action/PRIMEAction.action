@@ -1,0 +1,20 @@
+# PRIME Action
+# For executing multi-step PRIME interactions
+
+# Goal
+string task_description
+bool require_confirmation
+
+---
+# Result
+bool success
+string message
+string[] executed_tools
+string final_object_id
+
+---
+# Feedback
+string current_step
+SymbolicState current_state
+CandidateSet candidates
+string llm_reasoning

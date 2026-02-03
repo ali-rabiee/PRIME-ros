@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Full PRIME system launch including robot and perception -->
+  
+  <!-- Arguments -->
+  <arg name="robot_type" default="j2n6s300"/>
+  <arg name="use_rviz" default="true"/>
+  
+  <!-- 1. Launch Kinova robot driver -->
+  <include file="$(find kinova_bringup)/launch/kinova_robot.launch">
+    <arg name="kinova_robotType" value="$(arg robot_type)"/>
+  </include>
+  
+  <!-- 2. Launch RealSense camera -->
+  <include file="$(find realsense2_camera)/launch/rs_camera.launch">
+    <arg name="align_depth" value="true"/>
+  </include>
+  
+  <!-- 3. Launch YOLO detection node -->
+  <include file="$(find yolo-ros)/launch/yolo_realsense.launch"/>
+  
+  <!-- 4. Launch MoveIt for motion planning -->
+  <include file="$(find j2n6s300_moveit_config)/launch/j2n6s300_demo.launch">
+    <arg name="use_rviz" value="$(arg use_rviz)"/>
+  </include>
+  
+  <!-- 5. Launch PRIME system -->
+  <include file="$(find prime_ros)/launch/prime.launch">
+    <arg name="robot_type" value="$(arg robot_type)"/>
+  </include>
+
+</launch>
