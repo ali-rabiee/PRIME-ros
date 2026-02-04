@@ -18,10 +18,17 @@ And outputs exactly ONE tool call per invocation:
 """
 
 import rospy
+import os
+import sys
 import json
 import requests
 from typing import Optional, Dict, Any, Tuple
 from threading import Lock
+
+# Ensure local PRIME scripts directory is on PYTHONPATH (rosrun wrapper doesn't add it)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
 
 try:
     from prime_ros.msg import (

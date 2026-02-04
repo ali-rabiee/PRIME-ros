@@ -23,8 +23,15 @@ when to suggest actions, and when to execute autonomously.
 """
 
 import rospy
+import os
+import sys
 from threading import Lock
 from enum import Enum
+
+# Ensure local PRIME scripts directory is on PYTHONPATH (rosrun wrapper doesn't add it)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
 
 try:
     from prime_ros.msg import (

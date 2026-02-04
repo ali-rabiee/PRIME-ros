@@ -11,10 +11,16 @@ This node bridges the symbolic tool calls to actual robot actions.
 """
 
 import rospy
+import os
 import sys
 import numpy as np
 from threading import Lock
 from typing import Optional, Tuple
+
+# Ensure local PRIME scripts directory is on PYTHONPATH (rosrun wrapper doesn't add it)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
 
 # MoveIt
 import moveit_commander
