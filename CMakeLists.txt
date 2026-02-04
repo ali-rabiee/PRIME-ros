@@ -74,6 +74,8 @@ catkin_install_python(PROGRAMS
   scripts/tool_executor.py
   scripts/user_interface.py
   scripts/joystick_monitor.py
+  scripts/go_home.py
+  scripts/print_home_state.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
