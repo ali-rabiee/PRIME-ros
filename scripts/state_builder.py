@@ -16,7 +16,7 @@ The symbolic state discretizes the workspace into a 3x3 grid and tracks:
 
 import rospy
 import numpy as np
-import json
+gimport json
 from collections import deque
 from threading import Lock
 
@@ -83,6 +83,7 @@ class StateBuilder:
         self.latest_detections = None
         self.latest_yolo_image = None
         self.latest_workspace_bbox = None  # [x1,y1,x2,y2] in pixels
+        self.latest_grid_bbox = None  # [x1,y1,x2,y2] in pixels (cropped ROI for A1..C3)
         self.use_mock_objects = rospy.get_param('~use_mock_objects', False)
         self.use_yolo_grid = rospy.get_param('~use_yolo_grid', True)
         self.gripper_cell_from_yolo = rospy.get_param('~gripper_cell_from_yolo', True)
@@ -197,6 +198,7 @@ class StateBuilder:
         with self.lock:
             self.latest_detections = payload.get("detections", [])
             self.latest_workspace_bbox = payload.get("workspace_bbox_xyxy", None)
+            self.latest_grid_bbox = payload.get("grid_bbox_xyxy", self.latest_workspace_bbox)
     
     def position_to_grid_cell(self, x, y):
         """
@@ -389,7 +391,7 @@ class StateBuilder:
         if not self.use_yolo_grid:
             return
 
-        if not self.latest_detections or self.latest_workspace_bbox is None:
+        if not self.latest_detections or self.latest_grid_bbox is None:
             # No workspace => can't compute A1..C3 reliably
             return
 
@@ -403,7 +405,7 @@ class StateBuilder:
             cx, cy = det.get("center_xy", [None, None])
             if cx is None or cy is None:
                 continue
-            grid_label, cell_index, row, col = self.pixel_to_grid_label(cx, cy, self.latest_workspace_bbox)
+            grid_label, cell_index, row, col = self.pixel_to_grid_label(cx, cy, self.latest_grid_bbox)
             if grid_label is None:
                 continue
 
@@ -495,7 +497,8 @@ class StateBuilder:
                 jac.sort(key=lambda d: float(d.get("conf", 0.0)), reverse=True)
                 cx, cy = jac[0].get("center_xy", [None, None])
                 if cx is not None and cy is not None:
-                    _, cell2, _, _ = self.pixel_to_grid_label(cx, cy, self.latest_workspace_bbox)
+                    bbox = self.latest_grid_bbox if self.latest_grid_bbox is not None else self.latest_workspace_bbox
+                    _, cell2, _, _ = self.pixel_to_grid_label(cx, cy, bbox)
                     if cell2 is not None:
                         gripper_cell = int(cell2)
 
