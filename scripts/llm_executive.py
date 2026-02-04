@@ -153,13 +153,21 @@ Output format (JSON only):
             obj_strs = []
             for obj in state.objects:
                 held = " [HELD]" if obj.is_held else ""
-                obj_strs.append(f"{obj.object_id} ({obj.label}) at grid cell {obj.grid_cell}{held}")
+                grid_lbl = getattr(obj, "grid_label", "")
+                if grid_lbl:
+                    obj_strs.append(f"{obj.object_id} ({obj.label}) at {grid_lbl}{held}")
+                else:
+                    obj_strs.append(f"{obj.object_id} ({obj.label}) at grid cell {obj.grid_cell}{held}")
             lines.append(f"Objects: {'; '.join(obj_strs)}")
         else:
             lines.append("Objects: none detected")
         
         # Gripper
-        lines.append(f"Gripper: cell {state.gripper_grid_cell}, height {state.gripper_height:.2f}m, yaw {state.gripper_yaw:.2f}rad")
+        gr_lbl = getattr(state, "gripper_grid_label", "")
+        if gr_lbl:
+            lines.append(f"Gripper: {gr_lbl}, height {state.gripper_height:.2f}m, yaw {state.gripper_yaw:.2f}rad")
+        else:
+            lines.append(f"Gripper: cell {state.gripper_grid_cell}, height {state.gripper_height:.2f}m, yaw {state.gripper_yaw:.2f}rad")
         
         # Motion trend
         if len(state.gripper_history) >= 2:

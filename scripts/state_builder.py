@@ -16,10 +16,11 @@ The symbolic state discretizes the workspace into a 3x3 grid and tracks:
 
 import rospy
 import numpy as np
+import json
 from collections import deque
 from threading import Lock
 
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
 from geometry_msgs.msg import PoseStamped, Point
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
@@ -81,6 +82,10 @@ class StateBuilder:
         # YOLO detection results (from yolo_node.py)
         self.latest_detections = None
         self.latest_yolo_image = None
+        self.latest_workspace_bbox = None  # [x1,y1,x2,y2] in pixels
+        self.use_mock_objects = rospy.get_param('~use_mock_objects', False)
+        self.use_yolo_grid = rospy.get_param('~use_yolo_grid', True)
+        self.gripper_cell_from_yolo = rospy.get_param('~gripper_cell_from_yolo', True)
         
         # Subscribers
         driver_prefix = f'/{self.robot_type}_driver'
@@ -103,6 +108,14 @@ class StateBuilder:
             '/yolo/image_with_bboxes',
             Image,
             self.yolo_callback
+        )
+
+        # Structured detections from yolo_node.py
+        self.yolo_dets_sub = rospy.Subscriber(
+            '/yolo/detections_json',
+            String,
+            self.yolo_detections_callback,
+            queue_size=1
         )
         
         # We'll also need the raw detections - for now using the annotated image
@@ -172,6 +185,18 @@ class StateBuilder:
             self.latest_yolo_image = msg
             # TODO: Parse actual detection results
             # For now, we'll create mock objects based on the existing yolo_node structure
+
+    def yolo_detections_callback(self, msg):
+        """Receive structured YOLO detections JSON (bbox + grid cell labels)."""
+        try:
+            payload = json.loads(msg.data)
+        except Exception as e:
+            rospy.logwarn_throttle(1.0, f"Failed to parse /yolo/detections_json: {e}")
+            return
+
+        with self.lock:
+            self.latest_detections = payload.get("detections", [])
+            self.latest_workspace_bbox = payload.get("workspace_bbox_xyxy", None)
     
     def position_to_grid_cell(self, x, y):
         """
@@ -200,6 +225,40 @@ class StateBuilder:
         cell = row * self.grid_cols + col
         
         return cell, row, col
+
+    @staticmethod
+    def pixel_to_grid_label(cx, cy, ws_bbox_xyxy):
+        """
+        Convert pixel coordinate to A1..C3 based on workspace bbox in image space.
+        """
+        if ws_bbox_xyxy is None:
+            return None, None, None, None
+        x1, y1, x2, y2 = ws_bbox_xyxy
+        w = max(1.0, float(x2 - x1))
+        h = max(1.0, float(y2 - y1))
+        col = int((float(cx) - x1) / (w / 3.0))
+        row = int((float(cy) - y1) / (h / 3.0))
+        col = int(np.clip(col, 0, 2))
+        row = int(np.clip(row, 0, 2))
+        row_letter = ["A", "B", "C"][row]
+        label = f"{row_letter}{col+1}"
+        cell_index = row * 3 + col
+        return label, cell_index, row, col
+
+    @staticmethod
+    def cell_index_to_label(cell_index, grid_cols=3):
+        """0..8 -> A1..C3"""
+        try:
+            cell_index = int(cell_index)
+        except Exception:
+            return None
+        if cell_index < 0:
+            return None
+        row = cell_index // grid_cols
+        col = cell_index % grid_cols
+        if not (0 <= row <= 2 and 0 <= col <= 2):
+            return None
+        return f"{['A','B','C'][row]}{col+1}"
     
     def get_gripper_yaw(self):
         """Extract yaw angle from gripper pose quaternion."""
@@ -324,12 +383,54 @@ class StateBuilder:
         
         For now, we'll create mock objects for testing.
         """
-        # TODO: Implement actual YOLO integration
-        # This would parse results from yolo_node and convert to ObjectState
-        pass
+        if not MSGS_AVAILABLE:
+            return
+
+        if not self.use_yolo_grid:
+            return
+
+        if not self.latest_detections or self.latest_workspace_bbox is None:
+            # No workspace => can't compute A1..C3 reliably
+            return
+
+        # Rebuild objects each update (simple version; IDs will be stable by sort order)
+        objs = [d for d in self.latest_detections if d.get("class") == "object"]
+        # Sort by image center to keep deterministic IDs
+        objs.sort(key=lambda d: (d.get("center_xy", [0, 0])[1], d.get("center_xy", [0, 0])[0]))
+
+        self.detected_objects = {}
+        for idx, det in enumerate(objs):
+            cx, cy = det.get("center_xy", [None, None])
+            if cx is None or cy is None:
+                continue
+            grid_label, cell_index, row, col = self.pixel_to_grid_label(cx, cy, self.latest_workspace_bbox)
+            if grid_label is None:
+                continue
+
+            obj = ObjectState()
+            obj.object_id = f"obj_{idx+1}"
+            obj.label = "object"
+            obj.grid_cell = int(cell_index)
+            obj.grid_row = int(row)
+            obj.grid_col = int(col)
+            obj.grid_label = str(grid_label)
+            # We don't have 3D position yet; encode as NaNs for now.
+            obj.position = Point(x=float("nan"), y=float("nan"), z=float("nan"))
+            obj.yaw_orientation = 0.0
+            obj.is_held = False
+            obj.confidence = float(det.get("conf", 0.0))
+            try:
+                obj.bbox_center_x = int(cx)
+                obj.bbox_center_y = int(cy)
+            except Exception:
+                obj.bbox_center_x = 0
+                obj.bbox_center_y = 0
+            self.detected_objects[obj.object_id] = obj
     
     def add_mock_objects(self):
         """Add mock objects for testing (remove in production)."""
+        if (not self.use_mock_objects) or (len(self.detected_objects) != 0):
+            return
         if len(self.detected_objects) == 0:
             # Add some test objects
             mock_objects = [
@@ -346,10 +447,13 @@ class StateBuilder:
                 obj.grid_cell = cell
                 obj.grid_row = row
                 obj.grid_col = col
+                obj.grid_label = self.cell_index_to_label(cell, grid_cols=self.grid_cols) or ""
                 obj.position = Point(x=x, y=y, z=z)
                 obj.yaw_orientation = 0.0
                 obj.is_held = False
                 obj.confidence = 0.9
+                obj.bbox_center_x = 0
+                obj.bbox_center_y = 0
                 self.detected_objects[obj_id] = obj
     
     def build_symbolic_state(self):
@@ -364,12 +468,14 @@ class StateBuilder:
         state.objects = list(self.detected_objects.values())
         
         # Gripper state
+        # Gripper: prefer robot pose if available; otherwise fall back to YOLO jaco cell.
+        gripper_cell = None
         if self.gripper_pose:
-            cell, row, col = self.position_to_grid_cell(
+            # Default: compute from robot pose (root frame).
+            gripper_cell, _, _ = self.position_to_grid_cell(
                 self.gripper_pose.pose.position.x,
                 self.gripper_pose.pose.position.y
             )
-            state.gripper_grid_cell = cell
             state.gripper_yaw = self.get_gripper_yaw()
             state.gripper_height = self.gripper_pose.pose.position.z
             state.gripper_position = Point(
@@ -377,6 +483,27 @@ class StateBuilder:
                 y=self.gripper_pose.pose.position.y,
                 z=self.gripper_pose.pose.position.z
             )
+        else:
+            state.gripper_yaw = 0.0
+            state.gripper_height = 0.0
+            state.gripper_position = Point(x=float("nan"), y=float("nan"), z=float("nan"))
+
+        # Override / fill from YOLO 'jaco' detection (image-space A1..C3).
+        if self.gripper_cell_from_yolo and self.latest_detections and self.latest_workspace_bbox is not None:
+            jac = [d for d in self.latest_detections if d.get("class") == "jaco"]
+            if len(jac) > 0:
+                jac.sort(key=lambda d: float(d.get("conf", 0.0)), reverse=True)
+                cx, cy = jac[0].get("center_xy", [None, None])
+                if cx is not None and cy is not None:
+                    _, cell2, _, _ = self.pixel_to_grid_label(cx, cy, self.latest_workspace_bbox)
+                    if cell2 is not None:
+                        gripper_cell = int(cell2)
+
+        if gripper_cell is None:
+            gripper_cell = 0
+
+        state.gripper_grid_cell = int(gripper_cell)
+        state.gripper_grid_label = self.cell_index_to_label(gripper_cell, grid_cols=self.grid_cols) or ""
         
         # Gripper history
         state.gripper_history = list(self.gripper_history)
@@ -401,7 +528,7 @@ class StateBuilder:
     def update_state(self, event):
         """Periodic state update and publishing."""
         with self.lock:
-            # Update objects from YOLO (placeholder)
+            # Update objects from YOLO (structured JSON)
             self.update_detected_objects_from_yolo()
             
             # Add mock objects for testing

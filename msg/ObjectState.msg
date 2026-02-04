@@ -14,6 +14,9 @@ uint8 grid_cell
 uint8 grid_row
 uint8 grid_col
 
+# Human-readable grid label (A1..C3)
+string grid_label
+
 # Object pose in robot frame
 geometry_msgs/Point position
 float32 yaw_orientation

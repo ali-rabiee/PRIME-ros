@@ -8,6 +8,7 @@ ObjectState[] objects
 
 # Gripper state
 uint8 gripper_grid_cell
+string gripper_grid_label
 float32 gripper_yaw
 float32 gripper_height
 geometry_msgs/Point gripper_position
