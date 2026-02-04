@@ -4,6 +4,9 @@
   <arg name="robot_type" default="j2n6s300"/>
   <arg name="use_sim" default="false"/>
   <arg name="llm_endpoint" default="http://localhost:11434/api/generate"/>
+  <arg name="auto_home" default="true"/>
+  <arg name="home_target" default="Home"/>
+  <arg name="home_delay" default="3.0"/>
   
   <!-- Load parameters -->
   <rosparam file="$(find prime_ros)/config/prime_params.yaml" command="load"/>
@@ -36,6 +39,18 @@
   <!-- Executes tool calls using MoveIt -->
   <node pkg="prime_ros" type="tool_executor.py" name="tool_executor" output="screen">
     <param name="robot_type" value="$(arg robot_type)"/>
+    <!-- MoveIt python reads /joint_states; Kinova publishes /<robot>_driver/out/joint_state -->
+    <remap from="/joint_states" to="/$(arg robot_type)_driver/out/joint_state"/>
+  </node>
+
+  <!-- Auto-home at startup (named target from SRDF) -->
+  <node if="$(arg auto_home)" pkg="prime_ros" type="go_home.py" name="prime_go_home" output="screen">
+    <param name="group" value="arm"/>
+    <param name="target" value="$(arg home_target)"/>
+    <param name="delay" value="$(arg home_delay)"/>
+    <param name="retries" value="5"/>
+    <param name="retry_sleep" value="2.0"/>
+    <remap from="/joint_states" to="/$(arg robot_type)_driver/out/joint_state"/>
   </node>
   
   <!-- User Interface Node -->
