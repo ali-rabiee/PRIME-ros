@@ -70,6 +70,8 @@ class PRIMENode:
         self.update_rate = rospy.get_param('~update_rate', 5.0)  # Hz
         self.activity_timeout = rospy.get_param('~activity_timeout', 2.0)  # seconds
         self.min_candidates_for_decision = rospy.get_param('~min_candidates', 1)
+        # Disable LLM decisions by default (LLM runs in its own node)
+        self.enable_decisions = rospy.get_param('~enable_decisions', False)
         
         # State
         self.lock = Lock()
@@ -250,16 +252,10 @@ class PRIMENode:
     
     def make_decision(self):
         """Call LLM to make a decision."""
-        if not self.llm_executive:
-            # Import and create LLM executive if not already done
-            from llm_executive import LLMExecutive
-            self.llm_executive = LLMExecutive()
-        
-        # Get decision from LLM
-        tool_call = self.llm_executive.decide()
-        
-        if tool_call:
-            self.handle_tool_call(tool_call)
+        # The LLM executive is intended to run as a separate ROS node (`llm_executive.py`).
+        # Creating it here would call rospy.init_node() again and crash.
+        rospy.logwarn("Decision-making is disabled in prime_node (enable with ~enable_decisions:=true after refactor).")
+        return
     
     def handle_tool_call(self, call: ToolCall):
         """Handle a tool call from the LLM."""
@@ -297,7 +293,7 @@ class PRIMENode:
         
         elif current_state == PRIMEState.MONITORING:
             # Check if we should make a decision
-            if self.should_make_decision():
+            if self.enable_decisions and self.should_make_decision():
                 with self.lock:
                     self.state = PRIMEState.DECIDING
                 rospy.loginfo("Making decision...")

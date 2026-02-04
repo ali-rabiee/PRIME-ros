@@ -17,6 +17,25 @@ workspace:
   z_min: 0.0
   z_max: 0.5
 
+# Safety boundary (recommended ON for real robot)
+# Used for:
+# - PRIME MoveIt tool-call validation (won't plan outside)
+# - Optional Kinova firmware protection zones (stops hardware joystick too when applied)
+safety_bounds:
+  enabled: true
+  frame_id: "root"
+  x_min: -0.26
+  x_max: 0.33
+  y_min: -0.7
+  y_max: -0.33
+  z_min: 0.32
+  z_max: 0.58
+  # How far the forbidden “outside slabs” extend beyond the bounds (meters)
+  outer_extent: 2.0
+  # Add planning-scene walls in MoveIt (helps planning respect limits)
+  add_moveit_walls: true
+  wall_thickness: 0.02
+
 # State builder parameters
 state_builder:
   gripper_history_length: 10  # Number of timesteps to keep

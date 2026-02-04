@@ -74,6 +74,18 @@ class ToolExecutor:
         self.pre_grasp_distance = rospy.get_param('tools/approach/pre_grasp_distance', 0.10)
         self.approach_speed = rospy.get_param('tools/approach/approach_speed', 0.1)
         self.align_tolerance = rospy.get_param('tools/align/tolerance', 0.1)
+
+        # Safety bounds (in root frame by default)
+        self.safety_enabled = rospy.get_param('safety_bounds/enabled', False)
+        self.safety_frame = rospy.get_param('safety_bounds/frame_id', 'root')
+        self.x_min = rospy.get_param('safety_bounds/x_min', rospy.get_param('workspace/x_min', -1e9))
+        self.x_max = rospy.get_param('safety_bounds/x_max', rospy.get_param('workspace/x_max', 1e9))
+        self.y_min = rospy.get_param('safety_bounds/y_min', rospy.get_param('workspace/y_min', -1e9))
+        self.y_max = rospy.get_param('safety_bounds/y_max', rospy.get_param('workspace/y_max', 1e9))
+        self.z_min = rospy.get_param('safety_bounds/z_min', rospy.get_param('workspace/z_min', -1e9))
+        self.z_max = rospy.get_param('safety_bounds/z_max', rospy.get_param('workspace/z_max', 1e9))
+        self.add_moveit_walls = rospy.get_param('safety_bounds/add_moveit_walls', False)
+        self.wall_thickness = rospy.get_param('safety_bounds/wall_thickness', 0.02)
         
         # Thread safety
         self.lock = Lock()
@@ -102,6 +114,13 @@ class ToolExecutor:
         
         # Set end effector
         self.arm_group.set_end_effector_link(f"{self.robot_type}_end_effector")
+
+        # Add MoveIt planning-scene safety walls (optional but recommended)
+        if self.safety_enabled and self.add_moveit_walls:
+            try:
+                self._add_safety_walls()
+            except Exception as e:
+                rospy.logwarn(f"Failed to add safety walls: {e}")
         
         # Finger action client
         self.finger_client = actionlib.SimpleActionClient(
@@ -152,6 +171,54 @@ class ToolExecutor:
             )
         
         rospy.loginfo("Tool Executor initialized")
+
+    def _in_bounds(self, x: float, y: float, z: float) -> bool:
+        return (self.x_min <= x <= self.x_max and
+                self.y_min <= y <= self.y_max and
+                self.z_min <= z <= self.z_max)
+
+    def _bounds_str(self) -> str:
+        return (f"x[{self.x_min:.3f},{self.x_max:.3f}] "
+                f"y[{self.y_min:.3f},{self.y_max:.3f}] "
+                f"z[{self.z_min:.3f},{self.z_max:.3f}] (frame={self.safety_frame})")
+
+    def _add_safety_walls(self):
+        """
+        Add 6 thin boxes around the allowed workspace.
+        This helps MoveIt avoid planning outside the region.
+        """
+        frame = self.safety_frame
+        # Center and size of allowed region
+        cx = 0.5 * (self.x_min + self.x_max)
+        cy = 0.5 * (self.y_min + self.y_max)
+        cz = 0.5 * (self.z_min + self.z_max)
+        sx = (self.x_max - self.x_min)
+        sy = (self.y_max - self.y_min)
+        sz = (self.z_max - self.z_min)
+
+        t = float(self.wall_thickness)
+        # walls: x-min, x-max, y-min, y-max, z-min (floor), z-max (ceiling)
+        walls = [
+            ("prime_wall_xmin", (self.x_min - t/2.0, cy, cz), (t, sy + 2*t, sz + 2*t)),
+            ("prime_wall_xmax", (self.x_max + t/2.0, cy, cz), (t, sy + 2*t, sz + 2*t)),
+            ("prime_wall_ymin", (cx, self.y_min - t/2.0, cz), (sx + 2*t, t, sz + 2*t)),
+            ("prime_wall_ymax", (cx, self.y_max + t/2.0, cz), (sx + 2*t, t, sz + 2*t)),
+            ("prime_wall_zmin", (cx, cy, self.z_min - t/2.0), (sx + 2*t, sy + 2*t, t)),
+            ("prime_wall_zmax", (cx, cy, self.z_max + t/2.0), (sx + 2*t, sy + 2*t, t)),
+        ]
+
+        rospy.loginfo(f"Adding MoveIt safety walls with bounds: {self._bounds_str()}")
+        for name, (x, y, z), (bx, by, bz) in walls:
+            pose = PoseStamped()
+            pose.header.frame_id = frame
+            pose.header.stamp = rospy.Time.now()
+            pose.pose.position.x = x
+            pose.pose.position.y = y
+            pose.pose.position.z = z
+            pose.pose.orientation.w = 1.0
+            self.scene.add_box(name, pose, size=(bx, by, bz))
+
+        rospy.sleep(1.0)  # allow PlanningScene to update
     
     def state_callback(self, msg: SymbolicState):
         """Handle symbolic state updates."""
@@ -260,6 +327,11 @@ class ToolExecutor:
         target_pose.pose.position.x = obj.position.x
         target_pose.pose.position.y = obj.position.y
         target_pose.pose.position.z = obj.position.z + self.pre_grasp_distance
+
+        if self.safety_enabled:
+            tx, ty, tz = target_pose.pose.position.x, target_pose.pose.position.y, target_pose.pose.position.z
+            if not self._in_bounds(tx, ty, tz):
+                return False, f"Target out of safety bounds ({self._bounds_str()}), got ({tx:.3f},{ty:.3f},{tz:.3f})"
         
         # Orientation - gripper pointing down
         # Euler ZYZ: azimuth, polar, rotation
@@ -293,6 +365,12 @@ class ToolExecutor:
         
         # Get current pose
         current_pose = self.arm_group.get_current_pose()
+        if self.safety_enabled:
+            px = current_pose.pose.position.x
+            py = current_pose.pose.position.y
+            pz = current_pose.pose.position.z
+            if not self._in_bounds(px, py, pz):
+                return False, f"Current pose out of safety bounds ({self._bounds_str()}), got ({px:.3f},{py:.3f},{pz:.3f})"
         
         # Create target pose with adjusted yaw
         target_pose = PoseStamped()

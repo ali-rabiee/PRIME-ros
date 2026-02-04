@@ -4,9 +4,11 @@
   <arg name="robot_type" default="j2n6s300"/>
   <arg name="use_sim" default="false"/>
   <arg name="llm_endpoint" default="http://localhost:11434/api/generate"/>
+  <arg name="start_llm" default="false"/>
   <arg name="auto_home" default="true"/>
   <arg name="home_target" default="Home"/>
   <arg name="home_delay" default="3.0"/>
+  <arg name="apply_safety_zones" default="true"/>
   
   <!-- Load parameters -->
   <rosparam file="$(find prime_ros)/config/prime_params.yaml" command="load"/>
@@ -29,9 +31,8 @@
     <param name="update_rate" value="10.0"/>
   </node>
   
-  <!-- LLM Executive Node -->
-  <!-- Runs the Qwen 2.5 model for decision making -->
-  <node pkg="prime_ros" type="llm_executive.py" name="llm_executive" output="screen">
+  <!-- LLM Executive Node (optional) -->
+  <node if="$(arg start_llm)" pkg="prime_ros" type="llm_executive.py" name="llm_executive" output="screen">
     <param name="model" value="qwen2.5"/>
   </node>
   
@@ -41,6 +42,21 @@
     <param name="robot_type" value="$(arg robot_type)"/>
     <!-- MoveIt python reads /joint_states; Kinova publishes /<robot>_driver/out/joint_state -->
     <remap from="/joint_states" to="/$(arg robot_type)_driver/out/joint_state"/>
+  </node>
+
+  <!-- Apply Kinova firmware protection zones (enforces bounds for hardware joystick too) -->
+  <node if="$(arg apply_safety_zones)" pkg="prime_ros" type="apply_safety_boundary.py" name="apply_safety_boundary" output="screen">
+    <param name="robot_type" value="$(arg robot_type)"/>
+    <param name="apply" value="true"/>
+    <param name="timeout" value="15.0"/>
+  </node>
+
+  <!-- Software Safety Monitor (fallback if firmware zones don't work for joystick) -->
+  <node if="$(arg apply_safety_zones)" pkg="prime_ros" type="safety_monitor.py" name="safety_monitor" output="screen">
+    <param name="robot_name" value="$(arg robot_type)"/>
+    <param name="check_rate" value="50"/>
+    <param name="margin" value="0.02"/>
+    <param name="warn_margin" value="0.05"/>
   </node>
 
   <!-- Auto-home at startup (named target from SRDF) -->
@@ -59,6 +75,8 @@
   
   <!-- Main PRIME Node -->
   <!-- Coordinates all components -->
-  <node pkg="prime_ros" type="prime_node.py" name="prime_executive" output="screen"/>
+  <node pkg="prime_ros" type="prime_node.py" name="prime_executive" output="screen">
+    <param name="enable_decisions" value="false"/>
+  </node>
 
 </launch>
