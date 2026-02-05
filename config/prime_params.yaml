@@ -5,6 +5,18 @@ robot:
   type: "j2n6s300"  # Kinova Jaco2 6-DOF
   driver_prefix: "/j2n6s300_driver"
   
+# Workspace grid configuration (3x3 as per paper)
+workspace:
+  grid_rows: 3
+  grid_cols: 3
+  # Workspace bounds in robot base frame (meters)
+  x_min: 0.2
+  x_max: 0.7
+  y_min: -0.4
+  y_max: 0.4
+  z_min: 0.0
+  z_max: 0.5
+
 # Option A (recommended): AprilTag-based mapping (no depth)
 # - Uses camera intrinsics + AprilTag pose to ray-cast pixels onto the tag plane
 # - Requires a one-time calibration of the tag pose in robot root frame (root_T_tag)
@@ -24,7 +36,7 @@ workspace_tag:
   # and set translation to the tag center measured in the robot root frame.
   root_T_tag:
     translation: [0.02, -0.85, 0.36]   # meters
-    rpy: [0.0, 0.0, 0.0]           # radians (roll, pitch, yaw)
+    rpy: [0.0, 3.14159, 0.0]           # radians (roll, pitch, yaw)
 
 # Safety boundary (recommended ON for real robot)
 # Used for:
@@ -33,16 +45,22 @@ workspace_tag:
 safety_bounds:
   enabled: true
   frame_id: "root"
-  x_min: -0.26
-  x_max: 0.33
-  y_min: -0.7
-  y_max: -0.33
-  z_min: 0.32
-  z_max: 0.58
+  x_min: -1
+  x_max: 1
+  y_min: -1
+  y_max: 1
+  z_min: -1
+  z_max: 1
+  # x_min: -0.26
+  # x_max: 0.33
+  # y_min: -0.7
+  # y_max: -0.33
+  # z_min: 0.32
+  # z_max: 0.58
   # How far the forbidden “outside slabs” extend beyond the bounds (meters)
   outer_extent: 2.0
   # Add planning-scene walls in MoveIt (helps planning respect limits)
-  add_moveit_walls: true
+  add_moveit_walls: false
   wall_thickness: 0.02
 
 # State builder parameters

@@ -18,7 +18,7 @@ import rospy
 import numpy as np
 import json
 from collections import deque
-from threading import Lock
+from threading import RLock
 
 from std_msgs.msg import Header, String
 from geometry_msgs.msg import PoseStamped, Point
@@ -57,6 +57,7 @@ class StateBuilder:
         # Parameters
         self.update_rate = rospy.get_param('~update_rate', 10.0)
         self.robot_type = rospy.get_param('robot/type', 'j2n6s300')
+        self.state_frame_id = rospy.get_param('~state_frame_id', f"{self.robot_type}_link_base")
         
         # Workspace configuration
         self.grid_rows = rospy.get_param('workspace/grid_rows', 3)
@@ -94,7 +95,8 @@ class StateBuilder:
         self.position_threshold = rospy.get_param('state_builder/position_threshold', 0.02)
         
         # Thread safety
-        self.lock = Lock()
+        # NOTE: We call helper functions that also read cached state; use RLock to avoid deadlocks.
+        self.lock = RLock()
         
         # State variables
         self.gripper_pose = None
@@ -328,14 +330,14 @@ class StateBuilder:
         then transform the resulting 3D point into the robot root frame.
 
         Returns np.array([x,y,z]) in root frame, or None.
+        IMPORTANT: caller must already hold self.lock (do NOT re-acquire here).
         """
         if not self.use_workspace_tag:
             return None
 
-        with self.lock:
-            ready = self._camera_model_ready
-            fx, fy, cx0, cy0 = self._fx, self._fy, self._cx, self._cy
-            cam_T_tag = self._latest_cam_T_tag
+        ready = self._camera_model_ready
+        fx, fy, cx0, cy0 = self._fx, self._fy, self._cx, self._cy
+        cam_T_tag = self._latest_cam_T_tag
 
         if (not ready) or cam_T_tag is None:
             return None
@@ -636,7 +638,8 @@ class StateBuilder:
             return None
         
         state = SymbolicState()
-        state.header = Header(stamp=rospy.Time.now(), frame_id='root')
+        # IMPORTANT: publish state in the robot base frame MoveIt expects
+        state.header = Header(stamp=rospy.Time.now(), frame_id=self.state_frame_id)
         
         # Objects
         state.objects = list(self.detected_objects.values())

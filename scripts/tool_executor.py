@@ -111,6 +111,14 @@ class ToolExecutor:
         self.arm_group.set_num_planning_attempts(5)
         self.arm_group.set_max_velocity_scaling_factor(0.3)
         self.arm_group.set_max_acceleration_scaling_factor(0.3)
+
+        # Frames
+        self.planning_frame = self.arm_group.get_planning_frame()
+        # Target frame for pose goals (defaults to MoveIt's planning frame)
+        self.target_frame = self.planning_frame
+        # Use current orientation for approach (instead of forcing straight-down which may be unreachable)
+        self.use_current_orientation = rospy.get_param('~use_current_orientation', True)
+        rospy.loginfo(f"MoveIt planning_frame={self.planning_frame}, target_frame={self.target_frame}, use_current_orientation={self.use_current_orientation}")
         
         # Set end effector
         self.arm_group.set_end_effector_link(f"{self.robot_type}_end_effector")
@@ -318,38 +326,99 @@ class ToolExecutor:
             
             obj = self.objects[object_id]
         
-        # Compute pre-grasp pose
+        # Compute pre-grasp pose in MoveIt's target frame
         target_pose = PoseStamped()
-        target_pose.header.frame_id = "root"
+        target_pose.header.frame_id = self.target_frame
         target_pose.header.stamp = rospy.Time.now()
-        
+
+        # Object position comes from symbolic state (state.header.frame_id). Transform if needed.
+        obj_frame = None
+        with self.lock:
+            if self.current_state is not None and getattr(self.current_state, "header", None) is not None:
+                obj_frame = self.current_state.header.frame_id
+        if not obj_frame:
+            obj_frame = self.target_frame
+
+        obj_pose = PoseStamped()
+        obj_pose.header.frame_id = obj_frame
+        obj_pose.header.stamp = rospy.Time(0)
+        obj_pose.pose.position.x = obj.position.x
+        obj_pose.pose.position.y = obj.position.y
+        obj_pose.pose.position.z = obj.position.z
+        obj_pose.pose.orientation.w = 1.0
+
+        try:
+            if obj_frame != self.target_frame:
+                obj_pose = self.tf_buffer.transform(obj_pose, self.target_frame, rospy.Duration(0.5))
+        except Exception as e:
+            return False, f"Failed TF transform {obj_frame}->{self.target_frame}: {e}"
+
         # Position above object
-        target_pose.pose.position.x = obj.position.x
-        target_pose.pose.position.y = obj.position.y
-        target_pose.pose.position.z = obj.position.z + self.pre_grasp_distance
+        target_pose.pose.position.x = obj_pose.pose.position.x
+        target_pose.pose.position.y = obj_pose.pose.position.y
+        target_pose.pose.position.z = obj_pose.pose.position.z + self.pre_grasp_distance
 
         if self.safety_enabled:
             tx, ty, tz = target_pose.pose.position.x, target_pose.pose.position.y, target_pose.pose.position.z
             if not self._in_bounds(tx, ty, tz):
                 return False, f"Target out of safety bounds ({self._bounds_str()}), got ({tx:.3f},{ty:.3f},{tz:.3f})"
         
-        # Orientation - gripper pointing down
-        # Euler ZYZ: azimuth, polar, rotation
-        q = quaternion_from_euler(0, np.pi, 0, 'sxyz')
-        target_pose.pose.orientation = Quaternion(*q)
+        # Orientation: use current gripper orientation (much more likely to have valid IK)
+        # or fall back to a "gripper down" orientation
+        if self.use_current_orientation:
+            try:
+                current_pose = self.arm_group.get_current_pose()
+                target_pose.pose.orientation = current_pose.pose.orientation
+            except Exception as e:
+                rospy.logwarn(f"Could not get current orientation, using default: {e}")
+                q = quaternion_from_euler(0, np.pi, 0, 'sxyz')
+                target_pose.pose.orientation = Quaternion(*q)
+        else:
+            # Gripper pointing down
+            q = quaternion_from_euler(0, np.pi, 0, 'sxyz')
+            target_pose.pose.orientation = Quaternion(*q)
         
         # Plan and execute
-        rospy.loginfo(f"APPROACH: Planning to {object_id} at ({obj.position.x:.2f}, {obj.position.y:.2f}, {obj.position.z + self.pre_grasp_distance:.2f})")
+        rospy.loginfo(
+            f"APPROACH: Planning to {object_id} at "
+            f"({target_pose.pose.position.x:.3f}, {target_pose.pose.position.y:.3f}, {target_pose.pose.position.z:.3f}) "
+            f"orientation=({target_pose.pose.orientation.x:.3f}, {target_pose.pose.orientation.y:.3f}, "
+            f"{target_pose.pose.orientation.z:.3f}, {target_pose.pose.orientation.w:.3f}) "
+            f"in frame {self.target_frame}"
+        )
         
         self.arm_group.set_pose_target(target_pose)
-        success = self.arm_group.go(wait=True)
+
+        # Plan first (so we can inspect the result)
+        plan = self.arm_group.plan()
+        # MoveIt plan() returns (success, trajectory, planning_time, error_code) in newer API,
+        # or just a trajectory in older API.
+        if isinstance(plan, tuple):
+            plan_success = plan[0]
+            trajectory = plan[1]
+            error_code = plan[3] if len(plan) > 3 else None
+        else:
+            trajectory = plan
+            plan_success = trajectory is not None and len(trajectory.joint_trajectory.points) > 0
+            error_code = None
+
+        if not plan_success:
+            self.arm_group.clear_pose_targets()
+            err_msg = f"Failed to plan path to {object_id}"
+            if error_code is not None:
+                err_msg += f" (MoveIt error_code={error_code})"
+            rospy.logwarn(err_msg)
+            return False, err_msg
+
+        rospy.loginfo(f"APPROACH: Plan found with {len(trajectory.joint_trajectory.points)} waypoints. Executing...")
+        success = self.arm_group.execute(trajectory, wait=True)
         self.arm_group.stop()
         self.arm_group.clear_pose_targets()
         
         if success:
             return True, f"Approached {object_id}"
         else:
-            return False, f"Failed to plan path to {object_id}"
+            return False, f"Planned but failed to execute path to {object_id}"
     
     def execute_align_yaw(self, object_id: str) -> Tuple[bool, str]:
         """

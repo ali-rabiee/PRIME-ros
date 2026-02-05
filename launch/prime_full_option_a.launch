@@ -3,7 +3,6 @@
   <!-- PRIME full stack + Option A (AprilTag workspace mapping, no depth) -->
 
   <arg name="robot_type" default="j2n6s300"/>
-  <arg name="use_rviz" default="true"/>
 
   <!-- AprilTag -->
   <arg name="tag_id" default="0"/>
@@ -65,9 +64,14 @@
     <remap from="camera_info" to="/camera/color/camera_info" />
   </node>
 
+  <!-- 4b) Connect the two TF trees: MoveIt uses 'world' as planning frame,
+       Kinova publishes in 'j2n6s300_link_base'. They are identical (identity transform). -->
+  <node pkg="tf2_ros" type="static_transform_publisher" name="world_to_base_link"
+        args="0 0 0 0 0 0 world j2n6s300_link_base" />
+
   <!-- 5) MoveIt -->
   <include file="$(find j2n6s300_moveit_config)/launch/j2n6s300_demo.launch">
-    <arg name="use_rviz" value="$(arg use_rviz)"/>
+    <!-- j2n6s300_demo.launch always starts RViz; no use_rviz arg -->
   </include>
 
   <!-- 6) PRIME system -->
