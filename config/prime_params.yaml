@@ -31,6 +31,9 @@ workspace_tag:
   # Topics (apriltag_ros publishes /tag_detections by default)
   tag_detections_topic: "/tag_detections"
   camera_info_topic: "/camera/color/camera_info"
+  # Stabilization: lock the camera->tag pose after N detections (camera fixed per episode)
+  lock_pose: true
+  lock_after_n: 15
   # Fixed calibration: robot root -> tag frame.
   # For a first test, if you align the tag edges with robot axes, you can keep rpy = [0,0,0]
   # and set translation to the tag center measured in the robot root frame.
@@ -39,7 +42,7 @@ workspace_tag:
     rpy: [0.0, 0.0, 0.0]              # radians (roll, pitch, yaw)
     # Per-axis sign correction applied after rotation, before translation.
     # Use [-1, 1, 1] if tag X is flipped relative to robot X.
-    axis_signs: [1.0, 1.0, 1.0]
+    axis_signs: [-1.0, 1.0, 1.0]
 
 # Safety boundary (recommended ON for real robot)
 # Used for:
@@ -65,6 +68,11 @@ state_builder:
   gripper_history_length: 10  # Number of timesteps to keep
   update_rate: 10.0  # Hz
   position_threshold: 0.02  # meters, minimum movement to update history
+  # Stabilization for YOLO detections -> PRIME objects
+  min_object_confidence: 0.5
+  track_max_age: 1.0            # seconds (keeps IDs stable through brief misses)
+  track_max_pixel_dist: 80.0    # pixels (matching radius for tracking)
+  track_smoothing_alpha: 0.35   # 0..1 (EMA smoothing on position/centroid)
 
 # Candidate selection parameters
 candidates:

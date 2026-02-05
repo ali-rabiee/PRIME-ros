@@ -7,6 +7,9 @@
   <!-- AprilTag -->
   <arg name="tag_id" default="0"/>
   <arg name="tag_size" default="0.18"/>
+  <!-- AprilTag input image: prefer rectified to reduce distortion error -->
+  <arg name="start_image_proc" default="true"/>
+  <arg name="tag_image_topic" default="/camera/color/image_rect_color"/>
 
   <!-- RealSense color stream tuning -->
   <arg name="color_width" default="1280"/>
@@ -16,6 +19,9 @@
   <!-- YOLO grid crop (inside workspace bbox) -->
   <arg name="grid_crop_top_ratio" default="0.5"/>
   <arg name="grid_crop_bottom_ratio" default="0.0"/>
+  <!-- If true, connects robot TF tree to camera_link (ONLY if you have correct extrinsics).
+       Leaving this false avoids MoveIt/octomap using a wrong transform. -->
+  <arg name="connect_camera_tf" default="false"/>
 
   <!-- 1) Kinova robot driver -->
   <include file="$(find kinova_bringup)/launch/kinova_robot.launch">
@@ -29,6 +35,10 @@
     <arg name="color_height" value="$(arg color_height)"/>
     <arg name="color_fps" value="$(arg color_fps)"/>
   </include>
+
+  <!-- 2b) Rectify color image for AprilTag (uses camera_info distortion model) -->
+  <node pkg="image_proc" type="image_proc" name="image_proc_color" ns="camera/color"
+        if="$(arg start_image_proc)" output="screen" />
 
   <!-- 3) YOLO detection -->
   <node pkg="yolo-ros" type="yolo_node.py" name="yolo_node" output="screen">
@@ -60,7 +70,7 @@
 
     <param name="publish_tag_detections_image" type="bool" value="true" />
 
-    <remap from="image_rect" to="/camera/color/image_raw" />
+    <remap from="image_rect" to="$(arg tag_image_topic)" />
     <remap from="camera_info" to="/camera/color/camera_info" />
   </node>
 
@@ -69,10 +79,11 @@
   <node pkg="tf2_ros" type="static_transform_publisher" name="world_to_base_link"
         args="0 0 0 0 0 0 world j2n6s300_link_base" />
 
-  <!-- Connect camera TF tree to robot tree (identity - camera TF internally consistent,
-       the actual camera-to-robot mapping is handled by Option A ray casting, not TF).
-       This silences MoveIt "unable to transform" warnings. -->
+  <!-- OPTIONAL: Connect camera TF tree to robot tree.
+       WARNING: do NOT use an identity transform here on a real system; it can create phantom
+       collisions (octomap) and break planning. Only enable if you have correct camera extrinsics. -->
   <node pkg="tf2_ros" type="static_transform_publisher" name="base_to_camera_link"
+        if="$(arg connect_camera_tf)"
         args="0 0 0 0 0 0 j2n6s300_link_base camera_link" />
 
   <!-- 5) MoveIt -->

@@ -82,6 +82,11 @@ class StateBuilder:
         # Optional per-axis sign correction (applied AFTER rotation, BEFORE translation)
         # Use [-1, 1, 1] to flip x, [1, -1, 1] to flip y, etc.
         self.axis_signs = rospy.get_param('workspace_tag/root_T_tag/axis_signs', [1.0, 1.0, 1.0])
+        # Stabilization: lock tag pose after N good detections (camera is fixed during episode)
+        self.lock_tag_pose = rospy.get_param('workspace_tag/lock_pose', True)
+        self.lock_tag_after_n = max(1, int(rospy.get_param('workspace_tag/lock_after_n', 15)))
+        self._tag_pose_locked = False
+        self._tag_pose_buffer = []  # list of (quat_xyzw, t_xyz)
 
         # Cached intrinsics for ray casting
         self._camera_model_ready = False
@@ -96,6 +101,14 @@ class StateBuilder:
         # State history configuration
         self.history_length = rospy.get_param('state_builder/gripper_history_length', 10)
         self.position_threshold = rospy.get_param('state_builder/position_threshold', 0.02)
+
+        # Detection filtering + tracking (stabilizes IDs and reduces pose jumps)
+        self.min_object_confidence = float(rospy.get_param('state_builder/min_object_confidence', 0.5))
+        self.track_max_age = float(rospy.get_param('state_builder/track_max_age', 1.0))  # seconds
+        self.track_max_pixel_dist = float(rospy.get_param('state_builder/track_max_pixel_dist', 80.0))  # pixels
+        self.track_smoothing_alpha = float(rospy.get_param('state_builder/track_smoothing_alpha', 0.35))  # EMA alpha
+        self.tracks = {}  # object_id -> track dict
+        self.next_track_id = 1
         
         # Thread safety
         # NOTE: We call helper functions that also read cached state; use RLock to avoid deadlocks.
@@ -206,6 +219,10 @@ class StateBuilder:
                 "WorkspaceTag mapping enabled (Option A): tag_id=%d tag_detections=%s camera_info=%s",
                 self.workspace_tag_id, self.tag_detections_topic, self.camera_info_topic
             )
+            rospy.loginfo(
+                "WorkspaceTag stabilization: lock_pose=%s lock_after_n=%d",
+                str(self.lock_tag_pose), self.lock_tag_after_n
+            )
     
     def gripper_pose_callback(self, msg):
         """Handle gripper pose updates."""
@@ -288,6 +305,11 @@ class StateBuilder:
         p = det.pose.pose.pose.position
         q = det.pose.pose.pose.orientation
 
+        # If requested, lock after N detections to reduce jitter
+        with self.lock:
+            if self.lock_tag_pose and self._tag_pose_locked:
+                return
+
         # Quaternion -> rotation matrix (camera<-tag)
         import math
         x, y, z, w = float(q.x), float(q.y), float(q.z), float(q.w)
@@ -307,6 +329,37 @@ class StateBuilder:
 
         with self.lock:
             self._latest_cam_T_tag = (R, t)
+            if self.lock_tag_pose and (not self._tag_pose_locked):
+                quat = np.array([x, y, z, w], dtype=np.float64)
+                self._tag_pose_buffer.append((quat, t))
+                if len(self._tag_pose_buffer) >= self.lock_tag_after_n:
+                    # Average translations
+                    ts = np.stack([tt for (_, tt) in self._tag_pose_buffer], axis=0)
+                    t_avg = np.mean(ts, axis=0)
+                    # Average quaternions (same hemisphere sum + normalize)
+                    q0 = self._tag_pose_buffer[0][0]
+                    q_sum = np.zeros(4, dtype=np.float64)
+                    for (qq, _) in self._tag_pose_buffer:
+                        if float(np.dot(qq, q0)) < 0.0:
+                            qq = -qq
+                        q_sum += qq
+                    q_sum_norm = np.linalg.norm(q_sum)
+                    if q_sum_norm > 0:
+                        q_avg = q_sum / q_sum_norm
+                        xa, ya, za, wa = float(q_avg[0]), float(q_avg[1]), float(q_avg[2]), float(q_avg[3])
+                        # quat -> R
+                        R_avg = np.array(
+                            [
+                                [1 - 2 * (ya * ya + za * za), 2 * (xa * ya - za * wa), 2 * (xa * za + ya * wa)],
+                                [2 * (xa * ya + za * wa), 1 - 2 * (xa * xa + za * za), 2 * (ya * za - xa * wa)],
+                                [2 * (xa * za - ya * wa), 2 * (ya * za + xa * wa), 1 - 2 * (xa * xa + ya * ya)],
+                            ],
+                            dtype=np.float64,
+                        )
+                        self._latest_cam_T_tag = (R_avg, t_avg)
+                        self._tag_pose_locked = True
+                        self._tag_pose_buffer = []
+                        rospy.loginfo(f"WorkspaceTag pose locked after {self.lock_tag_after_n} detections.")
 
     def _root_T_tag(self):
         """Return (R_root_tag, t_root_tag) from params."""
@@ -572,43 +625,120 @@ class StateBuilder:
             # No workspace => can't compute A1..C3 reliably
             return
 
-        # Rebuild objects each update (simple version; IDs will be stable by sort order)
-        objs = [d for d in self.latest_detections if d.get("class") == "object"]
-        # Sort by image center to keep deterministic IDs
-        objs.sort(key=lambda d: (d.get("center_xy", [0, 0])[1], d.get("center_xy", [0, 0])[0]))
+        now = rospy.Time.now().to_sec()
 
-        self.detected_objects = {}
-        for idx, det in enumerate(objs):
-            cx, cy = det.get("center_xy", [None, None])
+        # Expire stale tracks
+        for oid in list(self.tracks.keys()):
+            if (now - float(self.tracks[oid].get("last_seen", 0.0))) > self.track_max_age:
+                del self.tracks[oid]
+
+        # Build list of measured detections (filtered)
+        measured = []
+        for det in self.latest_detections:
+            if det.get("class") != "object":
+                continue
+            conf = float(det.get("conf", 0.0))
+            if conf < self.min_object_confidence:
+                continue
+            px, py = det.get("pick_xy", det.get("center_xy", [None, None]))
+            cx, cy = px, py
             if cx is None or cy is None:
                 continue
             grid_label, cell_index, row, col = self.pixel_to_grid_label(cx, cy, self.latest_grid_bbox)
             if grid_label is None:
                 continue
-
-            obj = ObjectState()
-            obj.object_id = f"obj_{idx+1}"
-            obj.label = "object"
-            obj.grid_cell = int(cell_index)
-            obj.grid_row = int(row)
-            obj.grid_col = int(col)
-            obj.grid_label = str(grid_label)
-            # Real (x,y,z) from Option A if enabled; else NaNs.
             p_root = self._pixel_to_point_in_root_on_tag_plane(int(cx), int(cy))
-            if p_root is not None:
-                obj.position = Point(x=float(p_root[0]), y=float(p_root[1]), z=float(p_root[2]))
+            if p_root is None or np.any(np.isnan(p_root)):
+                continue
+            measured.append(
+                {
+                    "cx": int(cx),
+                    "cy": int(cy),
+                    "conf": conf,
+                    "grid_label": str(grid_label),
+                    "grid_cell": int(cell_index),
+                    "grid_row": int(row),
+                    "grid_col": int(col),
+                    "x": float(p_root[0]),
+                    "y": float(p_root[1]),
+                    "z": float(p_root[2]),
+                }
+            )
+
+        # Sort by confidence (high first) for matching
+        measured.sort(key=lambda m: m["conf"], reverse=True)
+
+        # Greedy match to existing tracks by pixel distance
+        unmatched_tracks = set(self.tracks.keys())
+        max_d2 = float(self.track_max_pixel_dist) ** 2
+        alpha = float(self.track_smoothing_alpha)
+
+        for m in measured:
+            best_oid = None
+            best_d2 = 1e18
+            for oid in unmatched_tracks:
+                tr = self.tracks[oid]
+                dx = float(m["cx"]) - float(tr.get("cx", 0))
+                dy = float(m["cy"]) - float(tr.get("cy", 0))
+                d2 = dx * dx + dy * dy
+                if d2 < best_d2:
+                    best_d2 = d2
+                    best_oid = oid
+
+            if best_oid is not None and best_d2 <= max_d2:
+                tr = self.tracks[best_oid]
+                # EMA smoothing
+                tr["x"] = alpha * m["x"] + (1.0 - alpha) * float(tr.get("x", m["x"]))
+                tr["y"] = alpha * m["y"] + (1.0 - alpha) * float(tr.get("y", m["y"]))
+                tr["z"] = alpha * m["z"] + (1.0 - alpha) * float(tr.get("z", m["z"]))
+                tr["cx"] = int(round(alpha * m["cx"] + (1.0 - alpha) * float(tr.get("cx", m["cx"]))))
+                tr["cy"] = int(round(alpha * m["cy"] + (1.0 - alpha) * float(tr.get("cy", m["cy"]))))
+                tr["conf"] = float(m["conf"])
+                tr["grid_label"] = m["grid_label"]
+                tr["grid_cell"] = int(m["grid_cell"])
+                tr["grid_row"] = int(m["grid_row"])
+                tr["grid_col"] = int(m["grid_col"])
+                tr["last_seen"] = now
+                unmatched_tracks.remove(best_oid)
             else:
-                obj.position = Point(x=float("nan"), y=float("nan"), z=float("nan"))
+                # New track
+                oid = f"obj_{self.next_track_id}"
+                self.next_track_id += 1
+                self.tracks[oid] = {
+                    "x": m["x"],
+                    "y": m["y"],
+                    "z": m["z"],
+                    "cx": m["cx"],
+                    "cy": m["cy"],
+                    "conf": float(m["conf"]),
+                    "grid_label": m["grid_label"],
+                    "grid_cell": int(m["grid_cell"]),
+                    "grid_row": int(m["grid_row"]),
+                    "grid_col": int(m["grid_col"]),
+                    "last_seen": now,
+                }
+
+        # Build ObjectState list from active tracks (stable IDs)
+        self.detected_objects = {}
+        for oid, tr in self.tracks.items():
+            if (now - float(tr.get("last_seen", 0.0))) > self.track_max_age:
+                continue
+            obj = ObjectState()
+            obj.object_id = oid
+            obj.label = "object"
+            obj.grid_cell = int(tr.get("grid_cell", 0))
+            obj.grid_row = int(tr.get("grid_row", 0))
+            obj.grid_col = int(tr.get("grid_col", 0))
+            obj.grid_label = str(tr.get("grid_label", ""))
+            obj.position = Point(x=float(tr.get("x", float("nan"))),
+                                 y=float(tr.get("y", float("nan"))),
+                                 z=float(tr.get("z", float("nan"))))
             obj.yaw_orientation = 0.0
             obj.is_held = False
-            obj.confidence = float(det.get("conf", 0.0))
-            try:
-                obj.bbox_center_x = int(cx)
-                obj.bbox_center_y = int(cy)
-            except Exception:
-                obj.bbox_center_x = 0
-                obj.bbox_center_y = 0
-            self.detected_objects[obj.object_id] = obj
+            obj.confidence = float(tr.get("conf", 0.0))
+            obj.bbox_center_x = int(tr.get("cx", 0))
+            obj.bbox_center_y = int(tr.get("cy", 0))
+            self.detected_objects[oid] = obj
     
     def add_mock_objects(self):
         """Add mock objects for testing (remove in production)."""

@@ -355,6 +355,10 @@ class ToolExecutor:
         ty = obj_pose.pose.position.y
         tz = obj_pose.pose.position.z + self.pre_grasp_distance
 
+        # Guard against invalid perception outputs
+        if (not np.isfinite(tx)) or (not np.isfinite(ty)) or (not np.isfinite(tz)):
+            return False, f"Invalid target position for {object_id} (nan/inf). Check AprilTag + camera intrinsics + calibration."
+
         if self.safety_enabled:
             # Clamp to safety bounds instead of rejecting
             clamped = False
@@ -397,6 +401,38 @@ class ToolExecutor:
             f"orientation kept from current pose, frame {self.target_frame}"
         )
 
+        # Always plan from the latest measured state
+        try:
+            self.arm_group.set_start_state_to_current_state()
+        except Exception:
+            pass
+
+        # Prefer a short Cartesian translation first (more stable configs, keeps orientation)
+        try:
+            waypoints = [current_pose.pose, target_pose.pose]
+            cart_plan, fraction = self.arm_group.compute_cartesian_path(
+                waypoints,
+                eef_step=0.01,
+                jump_threshold=0.0
+            )
+            if cart_plan is not None and hasattr(cart_plan, "joint_trajectory"):
+                npts = len(cart_plan.joint_trajectory.points)
+            else:
+                npts = 0
+            if fraction >= 0.95 and npts > 0:
+                rospy.loginfo(f"APPROACH: Cartesian path fraction={fraction:.2f} ({npts} pts). Executing...")
+                success = self.arm_group.execute(cart_plan, wait=True)
+                self.arm_group.stop()
+                self.arm_group.clear_pose_targets()
+                if success:
+                    return True, f"Approached {object_id} (cartesian)"
+                return False, f"Cartesian plan found but failed to execute path to {object_id}"
+            else:
+                rospy.logwarn(f"APPROACH: Cartesian path fraction={fraction:.2f} ({npts} pts). Falling back to planner.")
+        except Exception as e:
+            rospy.logwarn(f"APPROACH: Cartesian path failed ({e}). Falling back to planner.")
+
+        # Fallback: OMPL planner to same 6-DOF pose
         self.arm_group.set_pose_target(target_pose)
 
         # Increase planning time and attempts for reliability
