@@ -42,7 +42,7 @@ workspace_tag:
     rpy: [0.0, 0.0, 0.0]              # radians (roll, pitch, yaw)
     # Per-axis sign correction applied after rotation, before translation.
     # Use [-1, 1, 1] if tag X is flipped relative to robot X.
-    axis_signs: [-1.0, 1.0, 1.0]
+    axis_signs: [-1.0, -1.0, 1.0]
 
 # Option B: Workspace homography (pixels -> root x,y; robust to camera tilt)
 # - Place 4+ reference AprilTags ON the table plane
