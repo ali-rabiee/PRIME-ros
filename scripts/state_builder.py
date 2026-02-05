@@ -79,6 +79,9 @@ class StateBuilder:
         self.camera_info_topic = rospy.get_param('workspace_tag/camera_info_topic', '/camera/color/camera_info')
         self.root_T_tag_translation = rospy.get_param('workspace_tag/root_T_tag/translation', [0.0, 0.0, 0.0])
         self.root_T_tag_rpy = rospy.get_param('workspace_tag/root_T_tag/rpy', [0.0, 0.0, 0.0])
+        # Optional per-axis sign correction (applied AFTER rotation, BEFORE translation)
+        # Use [-1, 1, 1] to flip x, [1, -1, 1] to flip y, etc.
+        self.axis_signs = rospy.get_param('workspace_tag/root_T_tag/axis_signs', [1.0, 1.0, 1.0])
 
         # Cached intrinsics for ray casting
         self._camera_model_ready = False
@@ -367,7 +370,11 @@ class StateBuilder:
 
         # tag -> root
         R_root_tag, t_root_tag = self._root_T_tag()
-        p_root = R_root_tag @ p_tag + t_root_tag
+        p_rotated = R_root_tag @ p_tag
+        # Apply per-axis sign correction (e.g. [-1,1,1] to flip x)
+        signs = np.array([float(s) for s in self.axis_signs], dtype=np.float64)
+        p_rotated = p_rotated * signs
+        p_root = p_rotated + t_root_tag
         return p_root
     
     def position_to_grid_cell(self, x, y):

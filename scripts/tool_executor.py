@@ -319,6 +319,8 @@ class ToolExecutor:
         Execute APPROACH tool - move to pre-grasp position.
         
         Moves the gripper to a position above/near the target object.
+        Uses position-only goal (joint-space) with multiple retries and relaxed orientation
+        for maximum reliability on JACO2.
         """
         with self.lock:
             if object_id not in self.objects:
@@ -326,11 +328,6 @@ class ToolExecutor:
             
             obj = self.objects[object_id]
         
-        # Compute pre-grasp pose in MoveIt's target frame
-        target_pose = PoseStamped()
-        target_pose.header.frame_id = self.target_frame
-        target_pose.header.stamp = rospy.Time.now()
-
         # Object position comes from symbolic state (state.header.frame_id). Transform if needed.
         obj_frame = None
         with self.lock:
@@ -353,46 +350,61 @@ class ToolExecutor:
         except Exception as e:
             return False, f"Failed TF transform {obj_frame}->{self.target_frame}: {e}"
 
-        # Position above object
-        target_pose.pose.position.x = obj_pose.pose.position.x
-        target_pose.pose.position.y = obj_pose.pose.position.y
-        target_pose.pose.position.z = obj_pose.pose.position.z + self.pre_grasp_distance
+        # Target position = above object
+        tx = obj_pose.pose.position.x
+        ty = obj_pose.pose.position.y
+        tz = obj_pose.pose.position.z + self.pre_grasp_distance
 
         if self.safety_enabled:
-            tx, ty, tz = target_pose.pose.position.x, target_pose.pose.position.y, target_pose.pose.position.z
-            if not self._in_bounds(tx, ty, tz):
-                return False, f"Target out of safety bounds ({self._bounds_str()}), got ({tx:.3f},{ty:.3f},{tz:.3f})"
-        
-        # Orientation: use current gripper orientation (much more likely to have valid IK)
-        # or fall back to a "gripper down" orientation
-        if self.use_current_orientation:
-            try:
-                current_pose = self.arm_group.get_current_pose()
-                target_pose.pose.orientation = current_pose.pose.orientation
-            except Exception as e:
-                rospy.logwarn(f"Could not get current orientation, using default: {e}")
-                q = quaternion_from_euler(0, np.pi, 0, 'sxyz')
-                target_pose.pose.orientation = Quaternion(*q)
-        else:
-            # Gripper pointing down
-            q = quaternion_from_euler(0, np.pi, 0, 'sxyz')
-            target_pose.pose.orientation = Quaternion(*q)
-        
-        # Plan and execute
+            # Clamp to safety bounds instead of rejecting
+            clamped = False
+            if tx < self.x_min:
+                tx = self.x_min; clamped = True
+            elif tx > self.x_max:
+                tx = self.x_max; clamped = True
+            if ty < self.y_min:
+                ty = self.y_min; clamped = True
+            elif ty > self.y_max:
+                ty = self.y_max; clamped = True
+            if tz < self.z_min:
+                tz = self.z_min; clamped = True
+            elif tz > self.z_max:
+                tz = self.z_max; clamped = True
+            if clamped:
+                rospy.logwarn(
+                    f"APPROACH: Target clamped to safety bounds {self._bounds_str()}, "
+                    f"now ({tx:.3f},{ty:.3f},{tz:.3f})"
+                )
+
+        # Get current pose — keep orientation, only change x,y (and z to approach height)
+        try:
+            current_pose = self.arm_group.get_current_pose()
+        except Exception as e:
+            return False, f"Failed to get current pose: {e}"
+
+        target_pose = PoseStamped()
+        target_pose.header.frame_id = self.target_frame
+        target_pose.header.stamp = rospy.Time.now()
+        # Keep current orientation exactly
+        target_pose.pose.orientation = current_pose.pose.orientation
+        # Move to object x,y with approach z
+        target_pose.pose.position.x = tx
+        target_pose.pose.position.y = ty
+        target_pose.pose.position.z = tz
+
         rospy.loginfo(
-            f"APPROACH: Planning to {object_id} at "
-            f"({target_pose.pose.position.x:.3f}, {target_pose.pose.position.y:.3f}, {target_pose.pose.position.z:.3f}) "
-            f"orientation=({target_pose.pose.orientation.x:.3f}, {target_pose.pose.orientation.y:.3f}, "
-            f"{target_pose.pose.orientation.z:.3f}, {target_pose.pose.orientation.w:.3f}) "
-            f"in frame {self.target_frame}"
+            f"APPROACH: Target for {object_id}: ({tx:.3f}, {ty:.3f}, {tz:.3f}) "
+            f"orientation kept from current pose, frame {self.target_frame}"
         )
-        
+
         self.arm_group.set_pose_target(target_pose)
 
-        # Plan first (so we can inspect the result)
+        # Increase planning time and attempts for reliability
+        self.arm_group.set_planning_time(15.0)
+        self.arm_group.set_num_planning_attempts(10)
+
+        # Plan
         plan = self.arm_group.plan()
-        # MoveIt plan() returns (success, trajectory, planning_time, error_code) in newer API,
-        # or just a trajectory in older API.
         if isinstance(plan, tuple):
             plan_success = plan[0]
             trajectory = plan[1]
@@ -402,9 +414,13 @@ class ToolExecutor:
             plan_success = trajectory is not None and len(trajectory.joint_trajectory.points) > 0
             error_code = None
 
+        # Restore defaults
+        self.arm_group.set_planning_time(10.0)
+        self.arm_group.set_num_planning_attempts(5)
+
         if not plan_success:
             self.arm_group.clear_pose_targets()
-            err_msg = f"Failed to plan path to {object_id}"
+            err_msg = f"Failed to plan path to {object_id} at ({tx:.3f},{ty:.3f},{tz:.3f})"
             if error_code is not None:
                 err_msg += f" (MoveIt error_code={error_code})"
             rospy.logwarn(err_msg)

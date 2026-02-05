@@ -64,10 +64,16 @@
     <remap from="camera_info" to="/camera/color/camera_info" />
   </node>
 
-  <!-- 4b) Connect the two TF trees: MoveIt uses 'world' as planning frame,
-       Kinova publishes in 'j2n6s300_link_base'. They are identical (identity transform). -->
+  <!-- 4b) Connect TF trees so MoveIt ('world' frame) can see everything.
+       Kinova publishes in 'j2n6s300_link_base' which equals 'world'. -->
   <node pkg="tf2_ros" type="static_transform_publisher" name="world_to_base_link"
         args="0 0 0 0 0 0 world j2n6s300_link_base" />
+
+  <!-- Connect camera TF tree to robot tree (identity - camera TF internally consistent,
+       the actual camera-to-robot mapping is handled by Option A ray casting, not TF).
+       This silences MoveIt "unable to transform" warnings. -->
+  <node pkg="tf2_ros" type="static_transform_publisher" name="base_to_camera_link"
+        args="0 0 0 0 0 0 j2n6s300_link_base camera_link" />
 
   <!-- 5) MoveIt -->
   <include file="$(find j2n6s300_moveit_config)/launch/j2n6s300_demo.launch">
