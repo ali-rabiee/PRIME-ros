@@ -5,17 +5,26 @@ robot:
   type: "j2n6s300"  # Kinova Jaco2 6-DOF
   driver_prefix: "/j2n6s300_driver"
   
-# Workspace grid configuration (3x3 as per paper)
-workspace:
-  grid_rows: 3
-  grid_cols: 3
-  # Workspace bounds in robot base frame (meters)
-  x_min: 0.2
-  x_max: 0.7
-  y_min: -0.4
-  y_max: 0.4
-  z_min: 0.0
-  z_max: 0.5
+# Option A (recommended): AprilTag-based mapping (no depth)
+# - Uses camera intrinsics + AprilTag pose to ray-cast pixels onto the tag plane
+# - Requires a one-time calibration of the tag pose in robot root frame (root_T_tag)
+workspace_tag:
+  enabled: true
+  # AprilTag ID printed on the tag
+  tag_id: 0
+  # Tag black-square edge length in meters (border between black/white)
+  tag_size: 0.18
+  # Plane to intersect in tag frame (z=0 is the tag plane)
+  tag_plane_z: 0.0
+  # Topics (apriltag_ros publishes /tag_detections by default)
+  tag_detections_topic: "/tag_detections"
+  camera_info_topic: "/camera/color/camera_info"
+  # Fixed calibration: robot root -> tag frame.
+  # For a first test, if you align the tag edges with robot axes, you can keep rpy = [0,0,0]
+  # and set translation to the tag center measured in the robot root frame.
+  root_T_tag:
+    translation: [0.02, -0.85, 0.36]   # meters
+    rpy: [0.0, 0.0, 0.0]           # radians (roll, pitch, yaw)
 
 # Safety boundary (recommended ON for real robot)
 # Used for:

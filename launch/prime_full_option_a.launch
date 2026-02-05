@@ -1,0 +1,80 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- PRIME full stack + Option A (AprilTag workspace mapping, no depth) -->
+
+  <arg name="robot_type" default="j2n6s300"/>
+  <arg name="use_rviz" default="true"/>
+
+  <!-- AprilTag -->
+  <arg name="tag_id" default="0"/>
+  <arg name="tag_size" default="0.18"/>
+
+  <!-- RealSense color stream tuning -->
+  <arg name="color_width" default="1280"/>
+  <arg name="color_height" default="720"/>
+  <arg name="color_fps" default="30"/>
+
+  <!-- YOLO grid crop (inside workspace bbox) -->
+  <arg name="grid_crop_top_ratio" default="0.5"/>
+  <arg name="grid_crop_bottom_ratio" default="0.0"/>
+
+  <!-- 1) Kinova robot driver -->
+  <include file="$(find kinova_bringup)/launch/kinova_robot.launch">
+    <arg name="kinova_robotType" value="$(arg robot_type)"/>
+  </include>
+
+  <!-- 2) RealSense camera -->
+  <include file="$(find realsense2_camera)/launch/rs_camera.launch">
+    <arg name="align_depth" value="true"/>
+    <arg name="color_width" value="$(arg color_width)"/>
+    <arg name="color_height" value="$(arg color_height)"/>
+    <arg name="color_fps" value="$(arg color_fps)"/>
+  </include>
+
+  <!-- 3) YOLO detection -->
+  <node pkg="yolo-ros" type="yolo_node.py" name="yolo_node" output="screen">
+    <param name="grid_crop_top_ratio" value="$(arg grid_crop_top_ratio)"/>
+    <param name="grid_crop_bottom_ratio" value="$(arg grid_crop_bottom_ratio)"/>
+  </node>
+
+  <!-- 4) AprilTag detection -->
+  <node pkg="apriltag_ros" type="apriltag_ros_continuous_node" name="apriltag_ros_continuous_node"
+        clear_params="true" output="screen">
+    <rosparam>
+      tag_family: 'tag36h11'
+      tag_threads: 4
+      tag_decimate: 1.0
+      tag_blur: 0.0
+      tag_refine_edges: 1
+      tag_debug: 0
+      max_hamming_dist: 2
+      publish_tf: true
+      transport_hint: 'raw'
+    </rosparam>
+
+    <rosparam subst_value="true">
+      standalone_tags:
+        [
+          {id: $(arg tag_id), size: $(arg tag_size), name: workspace_tag}
+        ]
+    </rosparam>
+
+    <param name="publish_tag_detections_image" type="bool" value="true" />
+
+    <remap from="image_rect" to="/camera/color/image_raw" />
+    <remap from="camera_info" to="/camera/color/camera_info" />
+  </node>
+
+  <!-- 5) MoveIt -->
+  <include file="$(find j2n6s300_moveit_config)/launch/j2n6s300_demo.launch">
+    <arg name="use_rviz" value="$(arg use_rviz)"/>
+  </include>
+
+  <!-- 6) PRIME system -->
+  <include file="$(find prime_ros)/launch/prime.launch">
+    <arg name="robot_type" value="$(arg robot_type)"/>
+    <arg name="start_llm" value="false"/>
+  </include>
+
+</launch>
+

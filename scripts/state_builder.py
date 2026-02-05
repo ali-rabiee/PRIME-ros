@@ -16,14 +16,20 @@ The symbolic state discretizes the workspace into a 3x3 grid and tracks:
 
 import rospy
 import numpy as np
-gimport json
+import json
 from collections import deque
 from threading import Lock
 
 from std_msgs.msg import Header, String
 from geometry_msgs.msg import PoseStamped, Point
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
+
+try:
+    from apriltag_ros.msg import AprilTagDetectionArray
+    APRILTAG_AVAILABLE = True
+except ImportError:
+    APRILTAG_AVAILABLE = False
 
 try:
     from prime_ros.msg import (
@@ -61,6 +67,27 @@ class StateBuilder:
         self.y_max = rospy.get_param('workspace/y_max', 0.4)
         self.z_min = rospy.get_param('workspace/z_min', 0.0)
         self.z_max = rospy.get_param('workspace/z_max', 0.5)
+
+        # Option A: AprilTag-based (x,y) inference on workspace plane (no depth)
+        # If enabled, we ray-cast bbox centers onto the tag plane using camera intrinsics,
+        # then transform into the robot root frame using a fixed root_T_tag calibration.
+        self.use_workspace_tag = rospy.get_param('workspace_tag/enabled', False)
+        self.workspace_tag_id = int(rospy.get_param('workspace_tag/tag_id', 0))
+        self.workspace_tag_plane_z = float(rospy.get_param('workspace_tag/tag_plane_z', 0.0))  # plane in tag frame
+        self.tag_detections_topic = rospy.get_param('workspace_tag/tag_detections_topic', '/tag_detections')
+        self.camera_info_topic = rospy.get_param('workspace_tag/camera_info_topic', '/camera/color/camera_info')
+        self.root_T_tag_translation = rospy.get_param('workspace_tag/root_T_tag/translation', [0.0, 0.0, 0.0])
+        self.root_T_tag_rpy = rospy.get_param('workspace_tag/root_T_tag/rpy', [0.0, 0.0, 0.0])
+
+        # Cached intrinsics for ray casting
+        self._camera_model_ready = False
+        self._fx = None
+        self._fy = None
+        self._cx = None
+        self._cy = None
+
+        # Cached camera<-tag pose from apriltag_ros detections: (R_cam_tag (3x3), t_cam_tag (3,))
+        self._latest_cam_T_tag = None
         
         # State history configuration
         self.history_length = rospy.get_param('state_builder/gripper_history_length', 10)
@@ -118,6 +145,25 @@ class StateBuilder:
             self.yolo_detections_callback,
             queue_size=1
         )
+
+        # Camera intrinsics for ray casting (Option A)
+        self.camera_info_sub = rospy.Subscriber(
+            self.camera_info_topic,
+            CameraInfo,
+            self.camera_info_callback,
+            queue_size=1
+        )
+
+        # AprilTag detections (Option A)
+        if self.use_workspace_tag and APRILTAG_AVAILABLE:
+            self.tag_sub = rospy.Subscriber(
+                self.tag_detections_topic,
+                AprilTagDetectionArray,
+                self.tag_detections_callback,
+                queue_size=1
+            )
+        elif self.use_workspace_tag and not APRILTAG_AVAILABLE:
+            rospy.logwarn("workspace_tag/enabled is true but apriltag_ros is not available. Install ros-noetic-apriltag-ros or disable workspace_tag.")
         
         # We'll also need the raw detections - for now using the annotated image
         # In a full implementation, you'd modify yolo_node to publish structured detections
@@ -150,6 +196,11 @@ class StateBuilder:
         )
         
         rospy.loginfo("State Builder initialized")
+        if self.use_workspace_tag:
+            rospy.loginfo(
+                "WorkspaceTag mapping enabled (Option A): tag_id=%d tag_detections=%s camera_info=%s",
+                self.workspace_tag_id, self.tag_detections_topic, self.camera_info_topic
+            )
     
     def gripper_pose_callback(self, msg):
         """Handle gripper pose updates."""
@@ -199,6 +250,123 @@ class StateBuilder:
             self.latest_detections = payload.get("detections", [])
             self.latest_workspace_bbox = payload.get("workspace_bbox_xyxy", None)
             self.latest_grid_bbox = payload.get("grid_bbox_xyxy", self.latest_workspace_bbox)
+
+    def camera_info_callback(self, msg: CameraInfo):
+        """Cache pinhole intrinsics (K matrix) for ray casting."""
+        fx = float(msg.K[0])
+        fy = float(msg.K[4])
+        if fx <= 0 or fy <= 0:
+            return
+        with self.lock:
+            self._fx = fx
+            self._fy = fy
+            self._cx = float(msg.K[2])
+            self._cy = float(msg.K[5])
+            self._camera_model_ready = True
+
+    def tag_detections_callback(self, msg: "AprilTagDetectionArray"):
+        """Cache the latest camera<-tag pose for the configured tag id."""
+        if not msg.detections:
+            return
+
+        det = None
+        for d in msg.detections:
+            try:
+                if len(d.id) > 0 and int(d.id[0]) == self.workspace_tag_id:
+                    det = d
+                    break
+            except Exception:
+                continue
+        if det is None:
+            return
+
+        p = det.pose.pose.pose.position
+        q = det.pose.pose.pose.orientation
+
+        # Quaternion -> rotation matrix (camera<-tag)
+        import math
+        x, y, z, w = float(q.x), float(q.y), float(q.z), float(q.w)
+        n = math.sqrt(x * x + y * y + z * z + w * w)
+        if n == 0:
+            return
+        x, y, z, w = x / n, y / n, z / n, w / n
+        R = np.array(
+            [
+                [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+            ],
+            dtype=np.float64,
+        )
+        t = np.array([float(p.x), float(p.y), float(p.z)], dtype=np.float64)
+
+        with self.lock:
+            self._latest_cam_T_tag = (R, t)
+
+    def _root_T_tag(self):
+        """Return (R_root_tag, t_root_tag) from params."""
+        import math
+        roll, pitch, yaw = [float(v) for v in self.root_T_tag_rpy]
+        cr, sr = math.cos(roll), math.sin(roll)
+        cp, sp = math.cos(pitch), math.sin(pitch)
+        cy, sy = math.cos(yaw), math.sin(yaw)
+        # R = Rz(yaw) * Ry(pitch) * Rx(roll)
+        R = np.array(
+            [
+                [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+                [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+                [-sp, cp * sr, cp * cr],
+            ],
+            dtype=np.float64,
+        )
+        t = np.array([float(v) for v in self.root_T_tag_translation], dtype=np.float64)
+        return R, t
+
+    def _pixel_to_point_in_root_on_tag_plane(self, u: int, v: int):
+        """
+        Ray-cast pixel (u,v) onto the workspace tag plane (z=workspace_tag_plane_z in tag frame),
+        then transform the resulting 3D point into the robot root frame.
+
+        Returns np.array([x,y,z]) in root frame, or None.
+        """
+        if not self.use_workspace_tag:
+            return None
+
+        with self.lock:
+            ready = self._camera_model_ready
+            fx, fy, cx0, cy0 = self._fx, self._fy, self._cx, self._cy
+            cam_T_tag = self._latest_cam_T_tag
+
+        if (not ready) or cam_T_tag is None:
+            return None
+
+        # Ray in camera optical frame
+        x = (float(u) - cx0) / fx
+        y = (float(v) - cy0) / fy
+        d_cam = np.array([x, y, 1.0], dtype=np.float64)
+
+        R_cam_tag, t_cam_tag = cam_T_tag
+
+        # Invert to get tag<-camera
+        R_tag_cam = R_cam_tag.T
+        t_tag_cam = -R_tag_cam @ t_cam_tag
+
+        # Ray direction in tag frame
+        d_tag = R_tag_cam @ d_cam
+        if abs(d_tag[2]) < 1e-8:
+            return None
+
+        plane_z = float(self.workspace_tag_plane_z)
+        t = (plane_z - t_tag_cam[2]) / d_tag[2]
+        if t <= 0:
+            return None
+
+        p_tag = t_tag_cam + t * d_tag
+
+        # tag -> root
+        R_root_tag, t_root_tag = self._root_T_tag()
+        p_root = R_root_tag @ p_tag + t_root_tag
+        return p_root
     
     def position_to_grid_cell(self, x, y):
         """
@@ -416,8 +584,12 @@ class StateBuilder:
             obj.grid_row = int(row)
             obj.grid_col = int(col)
             obj.grid_label = str(grid_label)
-            # We don't have 3D position yet; encode as NaNs for now.
-            obj.position = Point(x=float("nan"), y=float("nan"), z=float("nan"))
+            # Real (x,y,z) from Option A if enabled; else NaNs.
+            p_root = self._pixel_to_point_in_root_on_tag_plane(int(cx), int(cy))
+            if p_root is not None:
+                obj.position = Point(x=float(p_root[0]), y=float(p_root[1]), z=float(p_root[2]))
+            else:
+                obj.position = Point(x=float("nan"), y=float("nan"), z=float("nan"))
             obj.yaw_orientation = 0.0
             obj.is_held = False
             obj.confidence = float(det.get("conf", 0.0))
