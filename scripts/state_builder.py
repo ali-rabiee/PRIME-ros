@@ -88,6 +88,32 @@ class StateBuilder:
         self._tag_pose_locked = False
         self._tag_pose_buffer = []  # list of (quat_xyzw, t_xyz)
 
+        # Option B (simple, robust to camera tilt): planar homography from pixels -> (x,y) in root frame.
+        # - Needs 4+ reference points on the table plane (e.g., 4 AprilTags).
+        # - You calibrate each tag's (x,y) in root ONCE, then each episode we compute H from current tag pixels.
+        self.use_workspace_homography = rospy.get_param('workspace_homography/enabled', False)
+        self.homography_tag_ids = [int(v) for v in rospy.get_param('workspace_homography/tag_ids', [])]
+        # Mapping: tag_id -> [x,y] in root frame (meters). Keys may come in as strings.
+        self.homography_tag_xy_root = rospy.get_param('workspace_homography/tag_xy_root', {})
+        self.homography_table_z = float(
+            rospy.get_param(
+                'workspace_homography/table_z',
+                float(self.root_T_tag_translation[2]) if self.use_workspace_tag else 0.0,
+            )
+        )
+        self.homography_lock = rospy.get_param('workspace_homography/lock_pose', True)
+        self.homography_median_window = max(1, int(rospy.get_param('workspace_homography/median_window', 15)))
+        # Optional: directly provide H (row-major 9 floats). If set, we won't recompute.
+        self._H_pixel_to_root_xy = None
+        H_list = rospy.get_param('workspace_homography/H_pixel_to_root_xy', None)
+        if isinstance(H_list, (list, tuple)) and len(H_list) == 9:
+            try:
+                self._H_pixel_to_root_xy = np.array([float(v) for v in H_list], dtype=np.float64).reshape((3, 3))
+            except Exception:
+                self._H_pixel_to_root_xy = None
+        self._H_locked = self._H_pixel_to_root_xy is not None
+        self._tag_uv_history = {}  # tag_id -> deque of (u,v) for median smoothing
+
         # Cached intrinsics for ray casting
         self._camera_model_ready = False
         self._fx = None
@@ -95,8 +121,11 @@ class StateBuilder:
         self._cx = None
         self._cy = None
 
-        # Cached camera<-tag pose from apriltag_ros detections: (R_cam_tag (3x3), t_cam_tag (3,))
-        self._latest_cam_T_tag = None
+        # Cached camera<-tag pose from apriltag_ros detections:
+        # - Option A uses one tag id (workspace_tag_id)
+        # - Homography uses multiple tag ids
+        self._latest_cam_T_tag = None  # (R_cam_tag, t_cam_tag) for workspace_tag_id
+        self._latest_cam_T_tag_by_id = {}  # tag_id -> (R_cam_tag, t_cam_tag)
         
         # State history configuration
         self.history_length = rospy.get_param('state_builder/gripper_history_length', 10)
@@ -172,16 +201,19 @@ class StateBuilder:
             queue_size=1
         )
 
-        # AprilTag detections (Option A)
-        if self.use_workspace_tag and APRILTAG_AVAILABLE:
+        # AprilTag detections (Option A and/or Homography)
+        if (self.use_workspace_tag or self.use_workspace_homography) and APRILTAG_AVAILABLE:
             self.tag_sub = rospy.Subscriber(
                 self.tag_detections_topic,
                 AprilTagDetectionArray,
                 self.tag_detections_callback,
                 queue_size=1
             )
-        elif self.use_workspace_tag and not APRILTAG_AVAILABLE:
-            rospy.logwarn("workspace_tag/enabled is true but apriltag_ros is not available. Install ros-noetic-apriltag-ros or disable workspace_tag.")
+        elif (self.use_workspace_tag or self.use_workspace_homography) and not APRILTAG_AVAILABLE:
+            rospy.logwarn(
+                "AprilTag mapping requested but apriltag_ros is not available. "
+                "Install ros-noetic-apriltag-ros or disable workspace_tag/workspace_homography."
+            )
         
         # We'll also need the raw detections - for now using the annotated image
         # In a full implementation, you'd modify yolo_node to publish structured detections
@@ -223,6 +255,16 @@ class StateBuilder:
                 "WorkspaceTag stabilization: lock_pose=%s lock_after_n=%d",
                 str(self.lock_tag_pose), self.lock_tag_after_n
             )
+        if self.use_workspace_homography:
+            rospy.loginfo(
+                "WorkspaceHomography enabled: tag_ids=%s table_z=%.3f lock_pose=%s median_window=%d",
+                str(self.homography_tag_ids),
+                float(self.homography_table_z),
+                str(self.homography_lock),
+                int(self.homography_median_window),
+            )
+            if self._H_pixel_to_root_xy is not None:
+                rospy.loginfo("WorkspaceHomography: using provided H_pixel_to_root_xy (locked).")
     
     def gripper_pose_callback(self, msg):
         """Handle gripper pose updates."""
@@ -286,80 +328,199 @@ class StateBuilder:
             self._cy = float(msg.K[5])
             self._camera_model_ready = True
 
+    def _project_cam_xyz_to_uv(self, t_cam: np.ndarray):
+        """Project a 3D point in camera optical frame to pixel (u,v)."""
+        if not self._camera_model_ready:
+            return None
+        fx, fy, cx0, cy0 = self._fx, self._fy, self._cx, self._cy
+        X, Y, Z = float(t_cam[0]), float(t_cam[1]), float(t_cam[2])
+        if Z <= 1e-6:
+            return None
+        u = fx * (X / Z) + cx0
+        v = fy * (Y / Z) + cy0
+        return float(u), float(v)
+
+    def _root_xy_for_tag_id(self, tag_id: int):
+        """Return (x,y) in root frame for a reference tag id, or None."""
+        mp = self.homography_tag_xy_root or {}
+        val = None
+        if tag_id in mp:
+            val = mp.get(tag_id)
+        if val is None:
+            val = mp.get(str(tag_id))
+        if val is None:
+            return None
+        try:
+            x, y = float(val[0]), float(val[1])
+        except Exception:
+            return None
+        return x, y
+
+    @staticmethod
+    def _compute_homography_dlt(src_uv: np.ndarray, dst_xy: np.ndarray):
+        """
+        Compute homography H (3x3) such that [x,y,1]^T ~ H [u,v,1]^T using DLT.
+        src_uv: (N,2) pixels, dst_xy: (N,2) meters. N>=4.
+        """
+        n = int(src_uv.shape[0])
+        if n < 4:
+            return None
+        A = []
+        for i in range(n):
+            u, v = float(src_uv[i, 0]), float(src_uv[i, 1])
+            x, y = float(dst_xy[i, 0]), float(dst_xy[i, 1])
+            A.append([-u, -v, -1, 0, 0, 0, u * x, v * x, x])
+            A.append([0, 0, 0, -u, -v, -1, u * y, v * y, y])
+        A = np.asarray(A, dtype=np.float64)
+        try:
+            _, _, Vt = np.linalg.svd(A)
+            h = Vt[-1, :]
+            H = h.reshape((3, 3))
+            if abs(H[2, 2]) > 1e-12:
+                H = H / H[2, 2]
+            return H
+        except Exception:
+            return None
+
+    def _maybe_update_homography(self):
+        """Update/lock H_pixel_to_root_xy based on recent tag detections (median-filtered)."""
+        if not self.use_workspace_homography:
+            return
+        if self._H_locked and self.homography_lock:
+            return
+        if not self._camera_model_ready:
+            return
+        if len(self.homography_tag_ids) < 4:
+            return
+
+        # Build correspondences from median tag pixels -> configured root (x,y)
+        src = []
+        dst = []
+        for tid in self.homography_tag_ids:
+            xy = self._root_xy_for_tag_id(int(tid))
+            if xy is None:
+                continue
+            hist = self._tag_uv_history.get(int(tid))
+            if not hist or len(hist) < self.homography_median_window:
+                continue
+            uv_arr = np.asarray(list(hist), dtype=np.float64)
+            u_med = float(np.median(uv_arr[:, 0]))
+            v_med = float(np.median(uv_arr[:, 1]))
+            src.append([u_med, v_med])
+            dst.append([float(xy[0]), float(xy[1])])
+
+        if len(src) < 4:
+            return
+
+        src_uv = np.asarray(src, dtype=np.float64)
+        dst_xy = np.asarray(dst, dtype=np.float64)
+
+        H = None
+        try:
+            import cv2  # optional dependency; DLT fallback if unavailable
+            H, _ = cv2.findHomography(src_uv, dst_xy, method=0)
+        except Exception:
+            H = None
+        if H is None:
+            H = self._compute_homography_dlt(src_uv, dst_xy)
+        if H is None:
+            return
+
+        self._H_pixel_to_root_xy = np.asarray(H, dtype=np.float64)
+        if self.homography_lock:
+            self._H_locked = True
+            rospy.loginfo(f"WorkspaceHomography locked with {len(src)} tag correspondences.")
+
     def tag_detections_callback(self, msg: "AprilTagDetectionArray"):
-        """Cache the latest camera<-tag pose for the configured tag id."""
+        """
+        Cache camera<-tag pose(s) from apriltag_ros detections.
+        - Option A: keep a stabilized pose for workspace_tag_id
+        - Homography: keep median-filtered projected pixel centers for multiple tags
+        """
         if not msg.detections:
             return
 
-        det = None
-        for d in msg.detections:
-            try:
-                if len(d.id) > 0 and int(d.id[0]) == self.workspace_tag_id:
-                    det = d
-                    break
-            except Exception:
-                continue
-        if det is None:
-            return
-
-        p = det.pose.pose.pose.position
-        q = det.pose.pose.pose.orientation
-
-        # If requested, lock after N detections to reduce jitter
-        with self.lock:
-            if self.lock_tag_pose and self._tag_pose_locked:
-                return
-
         # Quaternion -> rotation matrix (camera<-tag)
         import math
-        x, y, z, w = float(q.x), float(q.y), float(q.z), float(q.w)
-        n = math.sqrt(x * x + y * y + z * z + w * w)
-        if n == 0:
-            return
-        x, y, z, w = x / n, y / n, z / n, w / n
-        R = np.array(
-            [
-                [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-                [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
-                [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
-            ],
-            dtype=np.float64,
-        )
-        t = np.array([float(p.x), float(p.y), float(p.z)], dtype=np.float64)
-
         with self.lock:
-            self._latest_cam_T_tag = (R, t)
-            if self.lock_tag_pose and (not self._tag_pose_locked):
-                quat = np.array([x, y, z, w], dtype=np.float64)
-                self._tag_pose_buffer.append((quat, t))
-                if len(self._tag_pose_buffer) >= self.lock_tag_after_n:
-                    # Average translations
-                    ts = np.stack([tt for (_, tt) in self._tag_pose_buffer], axis=0)
-                    t_avg = np.mean(ts, axis=0)
-                    # Average quaternions (same hemisphere sum + normalize)
-                    q0 = self._tag_pose_buffer[0][0]
-                    q_sum = np.zeros(4, dtype=np.float64)
-                    for (qq, _) in self._tag_pose_buffer:
-                        if float(np.dot(qq, q0)) < 0.0:
-                            qq = -qq
-                        q_sum += qq
-                    q_sum_norm = np.linalg.norm(q_sum)
-                    if q_sum_norm > 0:
-                        q_avg = q_sum / q_sum_norm
-                        xa, ya, za, wa = float(q_avg[0]), float(q_avg[1]), float(q_avg[2]), float(q_avg[3])
-                        # quat -> R
-                        R_avg = np.array(
-                            [
-                                [1 - 2 * (ya * ya + za * za), 2 * (xa * ya - za * wa), 2 * (xa * za + ya * wa)],
-                                [2 * (xa * ya + za * wa), 1 - 2 * (xa * xa + za * za), 2 * (ya * za - xa * wa)],
-                                [2 * (xa * za - ya * wa), 2 * (ya * za + xa * wa), 1 - 2 * (xa * xa + ya * ya)],
-                            ],
-                            dtype=np.float64,
-                        )
-                        self._latest_cam_T_tag = (R_avg, t_avg)
-                        self._tag_pose_locked = True
-                        self._tag_pose_buffer = []
-                        rospy.loginfo(f"WorkspaceTag pose locked after {self.lock_tag_after_n} detections.")
+            # Update per-tag cache for homography (and for debugging)
+            for det in msg.detections:
+                try:
+                    if not det.id:
+                        continue
+                    tid = int(det.id[0])
+                except Exception:
+                    continue
+
+                p = det.pose.pose.pose.position
+                q = det.pose.pose.pose.orientation
+
+                x, y, z, w = float(q.x), float(q.y), float(q.z), float(q.w)
+                n = math.sqrt(x * x + y * y + z * z + w * w)
+                if n == 0:
+                    continue
+                x, y, z, w = x / n, y / n, z / n, w / n
+
+                R = np.array(
+                    [
+                        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+                    ],
+                    dtype=np.float64,
+                )
+                t = np.array([float(p.x), float(p.y), float(p.z)], dtype=np.float64)
+                self._latest_cam_T_tag_by_id[tid] = (R, t)
+
+                # Option A: update stabilized pose for the configured workspace_tag_id
+                if self.use_workspace_tag and tid == int(self.workspace_tag_id):
+                    if self.lock_tag_pose and self._tag_pose_locked:
+                        # keep locked pose
+                        pass
+                    else:
+                        self._latest_cam_T_tag = (R, t)
+                        if self.lock_tag_pose and (not self._tag_pose_locked):
+                            quat = np.array([x, y, z, w], dtype=np.float64)
+                            self._tag_pose_buffer.append((quat, t))
+                            if len(self._tag_pose_buffer) >= self.lock_tag_after_n:
+                                # Average translations
+                                ts = np.stack([tt for (_, tt) in self._tag_pose_buffer], axis=0)
+                                t_avg = np.mean(ts, axis=0)
+                                # Average quaternions (same hemisphere sum + normalize)
+                                q0 = self._tag_pose_buffer[0][0]
+                                q_sum = np.zeros(4, dtype=np.float64)
+                                for (qq, _) in self._tag_pose_buffer:
+                                    if float(np.dot(qq, q0)) < 0.0:
+                                        qq = -qq
+                                    q_sum += qq
+                                q_sum_norm = np.linalg.norm(q_sum)
+                                if q_sum_norm > 0:
+                                    q_avg = q_sum / q_sum_norm
+                                    xa, ya, za, wa = float(q_avg[0]), float(q_avg[1]), float(q_avg[2]), float(q_avg[3])
+                                    R_avg = np.array(
+                                        [
+                                            [1 - 2 * (ya * ya + za * za), 2 * (xa * ya - za * wa), 2 * (xa * za + ya * wa)],
+                                            [2 * (xa * ya + za * wa), 1 - 2 * (xa * xa + za * za), 2 * (ya * za - xa * wa)],
+                                            [2 * (xa * za - ya * wa), 2 * (ya * za + xa * wa), 1 - 2 * (xa * xa + ya * ya)],
+                                        ],
+                                        dtype=np.float64,
+                                    )
+                                    self._latest_cam_T_tag = (R_avg, t_avg)
+                                    self._tag_pose_locked = True
+                                    self._tag_pose_buffer = []
+                                    rospy.loginfo(f"WorkspaceTag pose locked after {self.lock_tag_after_n} detections.")
+
+                # Homography: update tag pixel history for configured reference tags
+                if self.use_workspace_homography and (tid in self.homography_tag_ids):
+                    uv = self._project_cam_xyz_to_uv(t)
+                    if uv is None:
+                        continue
+                    if tid not in self._tag_uv_history:
+                        self._tag_uv_history[tid] = deque(maxlen=self.homography_median_window)
+                    self._tag_uv_history[tid].append(uv)
+
+            # Try to compute/lock homography if enough samples collected
+            self._maybe_update_homography()
 
     def _root_T_tag(self):
         """Return (R_root_tag, t_root_tag) from params."""
@@ -429,6 +590,36 @@ class StateBuilder:
         p_rotated = p_rotated * signs
         p_root = p_rotated + t_root_tag
         return p_root
+
+    def _pixel_to_point_in_root_via_homography(self, u: int, v: int):
+        """
+        Map pixel (u,v) to (x,y) in root frame using a planar homography.
+        Returns np.array([x,y,z]) in root frame, or None.
+        IMPORTANT: caller must already hold self.lock (do NOT re-acquire here).
+        """
+        if (not self.use_workspace_homography) or (self._H_pixel_to_root_xy is None):
+            return None
+        H = self._H_pixel_to_root_xy
+        p = np.array([float(u), float(v), 1.0], dtype=np.float64)
+        q = H @ p
+        w = float(q[2])
+        if abs(w) < 1e-12:
+            return None
+        x = float(q[0] / w)
+        y = float(q[1] / w)
+        z = float(self.homography_table_z)
+        return np.array([x, y, z], dtype=np.float64)
+
+    def _pixel_to_point_in_root(self, u: int, v: int):
+        """
+        Unified pixel->root mapping:
+        - If workspace_homography is enabled and H is available, use it.
+        - Else fall back to Option A (workspace_tag ray-plane).
+        IMPORTANT: caller must already hold self.lock.
+        """
+        if self.use_workspace_homography and (self._H_pixel_to_root_xy is not None):
+            return self._pixel_to_point_in_root_via_homography(u, v)
+        return self._pixel_to_point_in_root_on_tag_plane(u, v)
     
     def position_to_grid_cell(self, x, y):
         """
@@ -647,7 +838,7 @@ class StateBuilder:
             grid_label, cell_index, row, col = self.pixel_to_grid_label(cx, cy, self.latest_grid_bbox)
             if grid_label is None:
                 continue
-            p_root = self._pixel_to_point_in_root_on_tag_plane(int(cx), int(cy))
+            p_root = self._pixel_to_point_in_root(int(cx), int(cy))
             if p_root is None or np.any(np.isnan(p_root)):
                 continue
             measured.append(

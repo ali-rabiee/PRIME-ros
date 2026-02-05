@@ -44,6 +44,27 @@ workspace_tag:
     # Use [-1, 1, 1] if tag X is flipped relative to robot X.
     axis_signs: [-1.0, 1.0, 1.0]
 
+# Option B: Workspace homography (pixels -> root x,y; robust to camera tilt)
+# - Place 4+ reference AprilTags ON the table plane
+# - One-time: record each tag center (x,y) in root frame using robot tool
+# - Each episode: state_builder computes H from current tag pixels (tags only need to be visible at startup)
+workspace_homography:
+  enabled: false
+  # Z to use for object positions (meters in root frame). Tool executor can keep a constant approach z.
+  table_z: 0.36
+  # If true, once H is computed it stays fixed for the episode.
+  lock_pose: true
+  # Median filter window (frames) used to stabilize tag pixels before computing H
+  median_window: 15
+  # Reference tag IDs (need >=4)
+  tag_ids: [0, 1, 2, 3]
+  # One-time calibration output from calibrate_workspace_homography.py:
+  # tag_xy_root:
+  #   "0": [x0, y0]
+  #   "1": [x1, y1]
+  #   "2": [x2, y2]
+  #   "3": [x3, y3]
+
 # Safety boundary (recommended ON for real robot)
 # Used for:
 # - PRIME MoveIt tool-call validation (won't plan outside)

@@ -7,6 +7,12 @@
   <!-- AprilTag -->
   <arg name="tag_id" default="0"/>
   <arg name="tag_size" default="0.18"/>
+  <!-- If true, configure 4 tags for workspace_homography (IDs below). -->
+  <arg name="use_homography" default="false"/>
+  <arg name="h_tag0_id" default="0"/>
+  <arg name="h_tag1_id" default="1"/>
+  <arg name="h_tag2_id" default="2"/>
+  <arg name="h_tag3_id" default="3"/>
   <!-- AprilTag input image: prefer rectified to reduce distortion error -->
   <arg name="start_image_proc" default="true"/>
   <arg name="tag_image_topic" default="/camera/color/image_rect_color"/>
@@ -61,7 +67,17 @@
       transport_hint: 'raw'
     </rosparam>
 
-    <rosparam subst_value="true">
+    <!-- Standalone tag set depends on mapping mode -->
+    <rosparam subst_value="true" if="$(arg use_homography)">
+      standalone_tags:
+        [
+          {id: $(arg h_tag0_id), size: $(arg tag_size), name: homography_tag_0},
+          {id: $(arg h_tag1_id), size: $(arg tag_size), name: homography_tag_1},
+          {id: $(arg h_tag2_id), size: $(arg tag_size), name: homography_tag_2},
+          {id: $(arg h_tag3_id), size: $(arg tag_size), name: homography_tag_3}
+        ]
+    </rosparam>
+    <rosparam subst_value="true" unless="$(arg use_homography)">
       standalone_tags:
         [
           {id: $(arg tag_id), size: $(arg tag_size), name: workspace_tag}
@@ -69,6 +85,10 @@
     </rosparam>
 
     <param name="publish_tag_detections_image" type="bool" value="true" />
+
+    <!-- Force standard/global output topic names (avoids private ~tag_detections confusion) -->
+    <remap from="tag_detections" to="/tag_detections" />
+    <remap from="tag_detections_image" to="/tag_detections_image" />
 
     <remap from="image_rect" to="$(arg tag_image_topic)" />
     <remap from="camera_info" to="/camera/color/camera_info" />

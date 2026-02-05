@@ -76,6 +76,7 @@ catkin_install_python(PROGRAMS
   scripts/joystick_monitor.py
   scripts/go_home.py
   scripts/print_home_state.py
+  scripts/calibrate_workspace_homography.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
