@@ -4,47 +4,27 @@
 robot:
   type: "j2n6s300"  # Kinova Jaco2 6-DOF
   driver_prefix: "/j2n6s300_driver"
-  
-# Workspace grid configuration (3x3 as per paper)
+
+# Workspace — defines the 3x3 grid and where grid cells map in the robot frame.
+# Grid cell centers (A1..C3) are derived from this rectangle.
+# This can differ from safety_bounds (e.g. workspace is a subset of the safe region).
 workspace:
+  frame_id: "root"
   grid_rows: 3
   grid_cols: 3
-  # Workspace bounds in robot base frame (meters)
-  x_min: 0.2
-  x_max: 0.7
-  y_min: -0.4
-  y_max: 0.4
-  z_min: 0.0
-  z_max: 0.5
-
-## Object metric pose (NO AprilTags)
-# We derive a usable (x,y,z) for each object from its grid cell (A1..C3) by mapping the 3x3
-# grid onto a metric rectangle in the robot base frame. This keeps tool calls simple and stable.
-workspace_metric:
-  enabled: true
-  frame_id: "root"
-  # Optional: flip mapping direction without changing x_min/x_max etc.
-  # This does NOT change the metric rectangle itself; it only reverses which grid column/row maps
-  # to min vs max along that axis.
-  # Examples:
-  # - [-1,  1, 1] flips left/right (A1<->A3 etc.)
-  # - [ 1, -1, 1] flips top/bottom (A*<->C* etc.)
-  # - [-1, -1, 1] flips both
-  axis_signs: [-1.0, -1.0, 1.0]
-  # If true, use safety_bounds x/y as the metric rectangle; otherwise use x_min/x_max/y_min/y_max below.
-  use_safety_bounds_xy: true
-  # Metric rectangle used when use_safety_bounds_xy=false
-  x_min: -0.26
+  # Metric rectangle for the 3x3 grid (in frame_id coordinates)
+  x_min: -0.33
   x_max: 0.33
   y_min: -0.70
   y_max: -0.33
   # Constant object Z (table height in root frame). APPROACH adds pre_grasp_distance on top.
   object_z: 0.36
+  # Flip grid-to-metric mapping direction without changing the rectangle itself.
+  # [-1, 1, 1] = flip left/right (A1<->A3), [1,-1,1] = flip top/bottom (A*<->C*), [-1,-1,1] = both
+  axis_signs: [-1.0, -1.0, 1.0]
 
-# Safety boundary (recommended ON for real robot)
-# Used for:
-# - PRIME MoveIt tool-call validation (won't plan outside)
-# - Optional Kinova firmware protection zones (stops hardware joystick too when applied)
+# Safety boundary — hard motion limits (recommended ON for real robot)
+# MoveIt tool calls are clamped to these bounds. Can be wider than workspace.
 safety_bounds:
   enabled: true
   frame_id: "root"
@@ -54,9 +34,7 @@ safety_bounds:
   y_max: -0.33
   z_min: 0.20
   z_max: 0.60
-  # How far the forbidden “outside slabs” extend beyond the bounds (meters)
   outer_extent: 2.0
-  # Add planning-scene walls in MoveIt (helps planning respect limits)
   add_moveit_walls: false
   wall_thickness: 0.02
 

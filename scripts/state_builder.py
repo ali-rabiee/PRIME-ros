@@ -46,28 +46,18 @@ class StateBuilder:
 
         # Robot / frames
         self.robot_type = rospy.get_param("robot/type", "j2n6s300")
-        self.state_frame_id = rospy.get_param("~state_frame_id", rospy.get_param("workspace_metric/frame_id", "root"))
+        self.state_frame_id = rospy.get_param("~state_frame_id", rospy.get_param("workspace/frame_id", "root"))
 
-        # Workspace (grid only)
+        # Workspace — grid dimensions + metric rectangle for grid cell centers
         self.grid_rows = int(rospy.get_param("workspace/grid_rows", 3))
         self.grid_cols = int(rospy.get_param("workspace/grid_cols", 3))
-
-        # Metric mapping from grid -> (x,y,z)
-        self.metric_enabled = bool(rospy.get_param("workspace_metric/enabled", True))
-        self.metric_frame_id = rospy.get_param("workspace_metric/frame_id", "root")
-        use_safety_xy = bool(rospy.get_param("workspace_metric/use_safety_bounds_xy", True))
-        if use_safety_xy:
-            self.metric_x_min = float(rospy.get_param("safety_bounds/x_min"))
-            self.metric_x_max = float(rospy.get_param("safety_bounds/x_max"))
-            self.metric_y_min = float(rospy.get_param("safety_bounds/y_min"))
-            self.metric_y_max = float(rospy.get_param("safety_bounds/y_max"))
-        else:
-            self.metric_x_min = float(rospy.get_param("workspace_metric/x_min"))
-            self.metric_x_max = float(rospy.get_param("workspace_metric/x_max"))
-            self.metric_y_min = float(rospy.get_param("workspace_metric/y_min"))
-            self.metric_y_max = float(rospy.get_param("workspace_metric/y_max"))
-        self.metric_object_z = float(rospy.get_param("workspace_metric/object_z", 0.0))
-        axis_signs = rospy.get_param("workspace_metric/axis_signs", [1.0, 1.0, 1.0])
+        self.metric_frame_id = rospy.get_param("workspace/frame_id", "root")
+        self.metric_x_min = float(rospy.get_param("workspace/x_min"))
+        self.metric_x_max = float(rospy.get_param("workspace/x_max"))
+        self.metric_y_min = float(rospy.get_param("workspace/y_min"))
+        self.metric_y_max = float(rospy.get_param("workspace/y_max"))
+        self.metric_object_z = float(rospy.get_param("workspace/object_z", 0.0))
+        axis_signs = rospy.get_param("workspace/axis_signs", [1.0, 1.0, 1.0])
         try:
             axis_signs = list(axis_signs)
         except Exception:
@@ -138,10 +128,10 @@ class StateBuilder:
         # Timer
         self.timer = rospy.Timer(rospy.Duration(1.0 / max(1e-3, self.update_rate)), self.update_state)
 
-        rospy.loginfo("State Builder initialized (NO AprilTags).")
+        rospy.loginfo("State Builder initialized.")
         rospy.loginfo(
-            "Metric grid mapping: enabled=%s frame=%s x[%.3f,%.3f] y[%.3f,%.3f] object_z=%.3f",
-            str(self.metric_enabled),
+            "Workspace grid: %dx%d  frame=%s  x[%.3f,%.3f] y[%.3f,%.3f] object_z=%.3f",
+            self.grid_rows, self.grid_cols,
             str(self.metric_frame_id),
             self.metric_x_min,
             self.metric_x_max,
@@ -441,11 +431,11 @@ class StateBuilder:
         # Grid config
         state.grid_rows = self.grid_rows
         state.grid_cols = self.grid_cols
-        # Keep existing workspace bounds (used by UI/state text, not for metric tool calls)
-        state.workspace_x_min = float(rospy.get_param("workspace/x_min", 0.0))
-        state.workspace_x_max = float(rospy.get_param("workspace/x_max", 0.0))
-        state.workspace_y_min = float(rospy.get_param("workspace/y_min", 0.0))
-        state.workspace_y_max = float(rospy.get_param("workspace/y_max", 0.0))
+        # Workspace bounds (same as grid metric rectangle)
+        state.workspace_x_min = self.metric_x_min
+        state.workspace_x_max = self.metric_x_max
+        state.workspace_y_min = self.metric_y_min
+        state.workspace_y_max = self.metric_y_max
 
         return state
 

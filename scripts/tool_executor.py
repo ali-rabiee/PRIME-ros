@@ -715,23 +715,16 @@ class ToolExecutor:
             col = grid_cell % 3
             if not (0 <= row < 3 and 0 <= col < 3):
                 return None
-            use_safety_xy = bool(rospy.get_param("workspace_metric/use_safety_bounds_xy", True))
-            if use_safety_xy:
-                x_min = float(rospy.get_param("safety_bounds/x_min"))
-                x_max = float(rospy.get_param("safety_bounds/x_max"))
-                y_min = float(rospy.get_param("safety_bounds/y_min"))
-                y_max = float(rospy.get_param("safety_bounds/y_max"))
-            else:
-                x_min = float(rospy.get_param("workspace_metric/x_min"))
-                x_max = float(rospy.get_param("workspace_metric/x_max"))
-                y_min = float(rospy.get_param("workspace_metric/y_min"))
-                y_max = float(rospy.get_param("workspace_metric/y_max"))
+            x_min = float(rospy.get_param("workspace/x_min"))
+            x_max = float(rospy.get_param("workspace/x_max"))
+            y_min = float(rospy.get_param("workspace/y_min"))
+            y_max = float(rospy.get_param("workspace/y_max"))
             x = x_min + (col + 0.5) * (x_max - x_min) / 3.0
             y = y_min + (row + 0.5) * (y_max - y_min) / 3.0
             return float(x), float(y)
 
         # If object pose is invalid, fall back to grid-derived pose.
-        # We use a constant object_z from workspace_metric, and tool adds pre_grasp_distance on top.
+        # We use a constant object_z from workspace config, and tool adds pre_grasp_distance on top.
         obj_x = float(obj.position.x)
         obj_y = float(obj.position.y)
         obj_z = float(obj.position.z)
@@ -740,7 +733,7 @@ class ToolExecutor:
             if xy is None:
                 return False, f"Invalid object pose for {object_id} and grid_cell missing; cannot APPROACH."
             obj_x, obj_y = float(xy[0]), float(xy[1])
-            obj_z = float(rospy.get_param("workspace_metric/object_z", 0.0))
+            obj_z = float(rospy.get_param("workspace/object_z", 0.0))
             rospy.logwarn(f"APPROACH: Using grid-cell center pose for {object_id} at ({obj_x:.3f},{obj_y:.3f},{obj_z:.3f}).")
         
         # Object position comes from symbolic state (state.header.frame_id). Transform if needed.
