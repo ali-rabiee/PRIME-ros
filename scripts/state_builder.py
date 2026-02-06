@@ -67,6 +67,14 @@ class StateBuilder:
             self.metric_y_min = float(rospy.get_param("workspace_metric/y_min"))
             self.metric_y_max = float(rospy.get_param("workspace_metric/y_max"))
         self.metric_object_z = float(rospy.get_param("workspace_metric/object_z", 0.0))
+        axis_signs = rospy.get_param("workspace_metric/axis_signs", [1.0, 1.0, 1.0])
+        try:
+            axis_signs = list(axis_signs)
+        except Exception:
+            axis_signs = [1.0, 1.0, 1.0]
+        while len(axis_signs) < 3:
+            axis_signs.append(1.0)
+        self.metric_axis_signs = [float(axis_signs[0]), float(axis_signs[1]), float(axis_signs[2])]
 
         # State builder parameters
         self.update_rate = float(rospy.get_param("state_builder/update_rate", 10.0))
@@ -140,6 +148,12 @@ class StateBuilder:
             self.metric_y_min,
             self.metric_y_max,
             self.metric_object_z,
+        )
+        rospy.loginfo(
+            "Metric axis_signs: [%.1f, %.1f, %.1f] (negative flips grid-to-metric direction)",
+            self.metric_axis_signs[0],
+            self.metric_axis_signs[1],
+            self.metric_axis_signs[2],
         )
 
     # -----------------------
@@ -216,6 +230,14 @@ class StateBuilder:
         """Map (row,col) to metric (x,y) center within the configured rectangle."""
         row = int(np.clip(row, 0, self.grid_rows - 1))
         col = int(np.clip(col, 0, self.grid_cols - 1))
+
+        # If axis_signs is negative, reverse which grid index maps to min/max along that axis.
+        # This is safer than multiplying coordinates by -1 because it stays inside the same rectangle.
+        if self.metric_axis_signs[0] < 0.0:
+            col = (self.grid_cols - 1) - col
+        if self.metric_axis_signs[1] < 0.0:
+            row = (self.grid_rows - 1) - row
+
         x = self.metric_x_min + (col + 0.5) * (self.metric_x_max - self.metric_x_min) / float(self.grid_cols)
         y = self.metric_y_min + (row + 0.5) * (self.metric_y_max - self.metric_y_min) / float(self.grid_rows)
         return float(x), float(y)

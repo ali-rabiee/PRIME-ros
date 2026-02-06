@@ -23,6 +23,14 @@ workspace:
 workspace_metric:
   enabled: true
   frame_id: "root"
+  # Optional: flip mapping direction without changing x_min/x_max etc.
+  # This does NOT change the metric rectangle itself; it only reverses which grid column/row maps
+  # to min vs max along that axis.
+  # Examples:
+  # - [-1,  1, 1] flips left/right (A1<->A3 etc.)
+  # - [ 1, -1, 1] flips top/bottom (A*<->C* etc.)
+  # - [-1, -1, 1] flips both
+  axis_signs: [-1.0, -1.0, 1.0]
   # If true, use safety_bounds x/y as the metric rectangle; otherwise use x_min/x_max/y_min/y_max below.
   use_safety_bounds_xy: true
   # Metric rectangle used when use_safety_bounds_xy=false
