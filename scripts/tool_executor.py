@@ -327,6 +327,45 @@ class ToolExecutor:
                 return False, f"Object {object_id} not found"
             
             obj = self.objects[object_id]
+
+        # Fallback mapping (NO AprilTags): if state_builder provided NaN pose, use grid cell centers.
+        # This keeps APPROACH usable even if object metric pose is unavailable.
+        def _grid_cell_center_xy(grid_cell: int):
+            try:
+                grid_cell = int(grid_cell)
+            except Exception:
+                return None
+            row = grid_cell // 3
+            col = grid_cell % 3
+            if not (0 <= row < 3 and 0 <= col < 3):
+                return None
+            use_safety_xy = bool(rospy.get_param("workspace_metric/use_safety_bounds_xy", True))
+            if use_safety_xy:
+                x_min = float(rospy.get_param("safety_bounds/x_min"))
+                x_max = float(rospy.get_param("safety_bounds/x_max"))
+                y_min = float(rospy.get_param("safety_bounds/y_min"))
+                y_max = float(rospy.get_param("safety_bounds/y_max"))
+            else:
+                x_min = float(rospy.get_param("workspace_metric/x_min"))
+                x_max = float(rospy.get_param("workspace_metric/x_max"))
+                y_min = float(rospy.get_param("workspace_metric/y_min"))
+                y_max = float(rospy.get_param("workspace_metric/y_max"))
+            x = x_min + (col + 0.5) * (x_max - x_min) / 3.0
+            y = y_min + (row + 0.5) * (y_max - y_min) / 3.0
+            return float(x), float(y)
+
+        # If object pose is invalid, fall back to grid-derived pose.
+        # We use a constant object_z from workspace_metric, and tool adds pre_grasp_distance on top.
+        obj_x = float(obj.position.x)
+        obj_y = float(obj.position.y)
+        obj_z = float(obj.position.z)
+        if (not np.isfinite(obj_x)) or (not np.isfinite(obj_y)) or (not np.isfinite(obj_z)):
+            xy = _grid_cell_center_xy(getattr(obj, "grid_cell", -1))
+            if xy is None:
+                return False, f"Invalid object pose for {object_id} and grid_cell missing; cannot APPROACH."
+            obj_x, obj_y = float(xy[0]), float(xy[1])
+            obj_z = float(rospy.get_param("workspace_metric/object_z", 0.0))
+            rospy.logwarn(f"APPROACH: Using grid-cell center pose for {object_id} at ({obj_x:.3f},{obj_y:.3f},{obj_z:.3f}).")
         
         # Object position comes from symbolic state (state.header.frame_id). Transform if needed.
         obj_frame = None
@@ -339,9 +378,9 @@ class ToolExecutor:
         obj_pose = PoseStamped()
         obj_pose.header.frame_id = obj_frame
         obj_pose.header.stamp = rospy.Time(0)
-        obj_pose.pose.position.x = obj.position.x
-        obj_pose.pose.position.y = obj.position.y
-        obj_pose.pose.position.z = obj.position.z
+        obj_pose.pose.position.x = obj_x
+        obj_pose.pose.position.y = obj_y
+        obj_pose.pose.position.z = obj_z
         obj_pose.pose.orientation.w = 1.0
 
         try:
@@ -357,7 +396,7 @@ class ToolExecutor:
 
         # Guard against invalid perception outputs
         if (not np.isfinite(tx)) or (not np.isfinite(ty)) or (not np.isfinite(tz)):
-            return False, f"Invalid target position for {object_id} (nan/inf). Check AprilTag + camera intrinsics + calibration."
+            return False, f"Invalid target position for {object_id} (nan/inf). Check state_builder object pose output."
 
         if self.safety_enabled:
             # Clamp to safety bounds instead of rejecting

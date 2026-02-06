@@ -1,15 +1,8 @@
 <?xml version="1.0"?>
 <launch>
-  <!-- PRIME full stack + Option A (AprilTag workspace mapping, no depth) -->
+  <!-- PRIME full stack (NO AprilTags). Grid-only + MoveIt tool calls. -->
 
   <arg name="robot_type" default="j2n6s300"/>
-
-  <!-- AprilTag -->
-  <arg name="tag_id" default="0"/>
-  <arg name="tag_size" default="0.18"/>
-  <!-- AprilTag input image: prefer rectified to reduce distortion error -->
-  <arg name="start_image_proc" default="true"/>
-  <arg name="tag_image_topic" default="/camera/color/image_rect_color"/>
 
   <!-- RealSense color stream tuning -->
   <arg name="color_width" default="1280"/>
@@ -36,45 +29,13 @@
     <arg name="color_fps" value="$(arg color_fps)"/>
   </include>
 
-  <!-- 2b) Rectify color image for AprilTag (uses camera_info distortion model) -->
-  <node pkg="image_proc" type="image_proc" name="image_proc_color" ns="camera/color"
-        if="$(arg start_image_proc)" output="screen" />
-
   <!-- 3) YOLO detection -->
   <node pkg="yolo-ros" type="yolo_node.py" name="yolo_node" output="screen">
     <param name="grid_crop_top_ratio" value="$(arg grid_crop_top_ratio)"/>
     <param name="grid_crop_bottom_ratio" value="$(arg grid_crop_bottom_ratio)"/>
   </node>
 
-  <!-- 4) AprilTag detection -->
-  <node pkg="apriltag_ros" type="apriltag_ros_continuous_node" name="apriltag_ros_continuous_node"
-        clear_params="true" output="screen">
-    <rosparam>
-      tag_family: 'tag36h11'
-      tag_threads: 4
-      tag_decimate: 1.0
-      tag_blur: 0.0
-      tag_refine_edges: 1
-      tag_debug: 0
-      max_hamming_dist: 2
-      publish_tf: true
-      transport_hint: 'raw'
-    </rosparam>
-
-    <rosparam subst_value="true">
-      standalone_tags:
-        [
-          {id: $(arg tag_id), size: $(arg tag_size), name: workspace_tag}
-        ]
-    </rosparam>
-
-    <param name="publish_tag_detections_image" type="bool" value="true" />
-
-    <remap from="image_rect" to="$(arg tag_image_topic)" />
-    <remap from="camera_info" to="/camera/color/camera_info" />
-  </node>
-
-  <!-- 4b) Connect TF trees so MoveIt ('world' frame) can see everything.
+  <!-- 4) Connect TF trees so MoveIt ('world' frame) can see everything.
        Kinova publishes in 'j2n6s300_link_base' which equals 'world'. -->
   <node pkg="tf2_ros" type="static_transform_publisher" name="world_to_base_link"
         args="0 0 0 0 0 0 world j2n6s300_link_base" />
