@@ -14,6 +14,7 @@ import rospy
 import os
 import sys
 import numpy as np
+import json
 from threading import Lock
 from typing import Optional, Tuple
 
@@ -32,6 +33,7 @@ from geometry_msgs.msg import PoseStamped, Pose, Point, Quaternion
 from tf.transformations import quaternion_from_euler
 import tf2_ros
 import tf2_geometry_msgs
+from std_msgs.msg import String
 
 # Kinova
 from kinova_msgs.msg import FingerPosition
@@ -75,6 +77,16 @@ class ToolExecutor:
         self.approach_speed = rospy.get_param('tools/approach/approach_speed', 0.1)
         self.align_tolerance = rospy.get_param('tools/align/tolerance', 0.1)
 
+        # Pixel-servo refinement params (after reaching grid-cell center)
+        self.servo_enabled = bool(rospy.get_param("tools/approach/pixel_servo/enabled", True))
+        self.servo_max_steps = int(rospy.get_param("tools/approach/pixel_servo/max_steps", 5))
+        self.servo_pixel_tol = float(rospy.get_param("tools/approach/pixel_servo/pixel_tolerance", 15.0))
+        self.servo_gain = float(rospy.get_param("tools/approach/pixel_servo/gain", 0.6))
+        self.servo_max_step_m = float(rospy.get_param("tools/approach/pixel_servo/max_step_m", 0.01))
+        self.servo_probe_step_m = float(rospy.get_param("tools/approach/pixel_servo/probe_step_m", 0.01))
+        self.servo_settle_s = float(rospy.get_param("tools/approach/pixel_servo/settle_time_s", 0.2))
+        self.servo_missing_stop = int(rospy.get_param("tools/approach/pixel_servo/missing_object_stop_frames", 2))
+
         # Safety bounds (in root frame by default)
         self.safety_enabled = rospy.get_param('safety_bounds/enabled', False)
         self.safety_frame = rospy.get_param('safety_bounds/frame_id', 'root')
@@ -94,6 +106,10 @@ class ToolExecutor:
         self.current_state: Optional[SymbolicState] = None
         self.objects: dict = {}  # object_id -> ObjectState
         self.memory = get_memory()
+
+        # Latest YOLO detections (for pixel servoing)
+        self._latest_yolo_detections = []
+        self._latest_yolo_stamp = 0.0
         
         # Initialize MoveIt
         rospy.loginfo("Initializing MoveIt...")
@@ -161,6 +177,14 @@ class ToolExecutor:
                 PRIMEResponse,
                 self.response_callback
             )
+
+        # YOLO detections JSON (needed for pixel-servo refinement)
+        self.yolo_dets_sub = rospy.Subscriber(
+            "/yolo/detections_json",
+            String,
+            self.yolo_detections_callback,
+            queue_size=1,
+        )
         
         # Publishers
         if MSGS_AVAILABLE:
@@ -189,6 +213,284 @@ class ToolExecutor:
         return (f"x[{self.x_min:.3f},{self.x_max:.3f}] "
                 f"y[{self.y_min:.3f},{self.y_max:.3f}] "
                 f"z[{self.z_min:.3f},{self.z_max:.3f}] (frame={self.safety_frame})")
+
+    def yolo_detections_callback(self, msg: String):
+        """Cache latest YOLO detections JSON for pixel-servo refinement."""
+        try:
+            payload = json.loads(msg.data)
+        except Exception:
+            return
+        dets = payload.get("detections", []) or []
+        stamp = float(payload.get("stamp", rospy.Time.now().to_sec()))
+        with self.lock:
+            self._latest_yolo_detections = dets
+            self._latest_yolo_stamp = stamp
+
+    def _get_best_det(self, class_name: str):
+        """Return best detection dict for class_name, or None."""
+        with self.lock:
+            dets = list(self._latest_yolo_detections)
+        best = None
+        best_c = -1.0
+        for d in dets:
+            if d.get("class") != class_name:
+                continue
+            c = float(d.get("conf", 0.0))
+            if c > best_c:
+                best_c = c
+                best = d
+        return best
+
+    @staticmethod
+    def _det_pick_xy(det: dict):
+        """Return (u,v) pick point for a YOLO detection dict."""
+        if det is None:
+            return None
+        uv = det.get("pick_xy", det.get("center_xy", [None, None]))
+        try:
+            u, v = int(uv[0]), int(uv[1])
+        except Exception:
+            return None
+        return float(u), float(v)
+
+    def _get_gripper_uv(self):
+        """Pixel (u,v) of gripper from YOLO 'jaco' detection."""
+        det = self._get_best_det("jaco")
+        return self._det_pick_xy(det)
+
+    def _find_object_uv(self, obj_grid_label: str, expected_uv: Tuple[float, float], max_px_dist: float = 200.0):
+        """
+        Find the current YOLO detection for the target object.
+        Preference order:
+        1) same grid cell label (e.g., 'B2') if available
+        2) nearest to expected_uv
+        Returns (u,v) or None if not detected.
+        """
+        with self.lock:
+            dets = list(self._latest_yolo_detections)
+        objs = [d for d in dets if d.get("class") == "object"]
+        if obj_grid_label:
+            in_cell = [d for d in objs if d.get("grid_cell") == obj_grid_label]
+            if in_cell:
+                objs = in_cell
+        best = None
+        best_d2 = 1e18
+        eu, ev = float(expected_uv[0]), float(expected_uv[1])
+        for d in objs:
+            uv = self._det_pick_xy(d)
+            if uv is None:
+                continue
+            du = float(uv[0]) - eu
+            dv = float(uv[1]) - ev
+            d2 = du * du + dv * dv
+            if d2 < best_d2:
+                best_d2 = d2
+                best = uv
+        if best is None:
+            return None
+        if best_d2 > float(max_px_dist) ** 2:
+            return None
+        return best
+
+    def _execute_cartesian_delta_xy(self, dx: float, dy: float, *, min_fraction: float = 0.95) -> bool:
+        """Small Cartesian translation in target_frame, keeping orientation + z."""
+        try:
+            current = self.arm_group.get_current_pose().pose
+        except Exception:
+            return False
+
+        target = Pose()
+        target.position.x = current.position.x + float(dx)
+        target.position.y = current.position.y + float(dy)
+        target.position.z = current.position.z
+        target.orientation = current.orientation
+
+        # Clamp to safety bounds if enabled (assumes safety bounds are in same frame as target_frame)
+        if self.safety_enabled:
+            target.position.x = float(np.clip(target.position.x, self.x_min, self.x_max))
+            target.position.y = float(np.clip(target.position.y, self.y_min, self.y_max))
+            target.position.z = float(np.clip(target.position.z, self.z_min, self.z_max))
+
+        # If clamping (or tiny dx/dy) results in no-op, treat as failure (important for Jacobian probing)
+        dx_eff = float(target.position.x - current.position.x)
+        dy_eff = float(target.position.y - current.position.y)
+        if abs(dx_eff) + abs(dy_eff) < 1e-6:
+            return False
+
+        try:
+            self.arm_group.set_start_state_to_current_state()
+        except Exception:
+            pass
+        try:
+            plan, fraction = self.arm_group.compute_cartesian_path([current, target], eef_step=0.005, jump_threshold=0.0)
+            if fraction >= float(min_fraction) and plan is not None and len(plan.joint_trajectory.points) > 0:
+                ok = self.arm_group.execute(plan, wait=True)
+                self.arm_group.stop()
+                self.arm_group.clear_pose_targets()
+                return bool(ok)
+        except Exception:
+            pass
+
+        # Fallback: plan to the same pose (still keeps orientation)
+        try:
+            ps = PoseStamped()
+            ps.header.frame_id = self.target_frame
+            ps.header.stamp = rospy.Time.now()
+            ps.pose = target
+
+            try:
+                self.arm_group.set_start_state_to_current_state()
+            except Exception:
+                pass
+
+            self.arm_group.set_pose_target(ps)
+            self.arm_group.set_planning_time(5.0)
+            self.arm_group.set_num_planning_attempts(3)
+            plan = self.arm_group.plan()
+
+            if isinstance(plan, tuple):
+                plan_success = bool(plan[0])
+                traj = plan[1]
+            else:
+                traj = plan
+                plan_success = traj is not None and len(traj.joint_trajectory.points) > 0
+
+            # restore defaults
+            self.arm_group.set_planning_time(10.0)
+            self.arm_group.set_num_planning_attempts(5)
+
+            if not plan_success:
+                self.arm_group.clear_pose_targets()
+                return False
+
+            ok = self.arm_group.execute(traj, wait=True)
+            self.arm_group.stop()
+            self.arm_group.clear_pose_targets()
+            return bool(ok)
+        except Exception:
+            try:
+                self.arm_group.stop()
+                self.arm_group.clear_pose_targets()
+            except Exception:
+                pass
+            return False
+
+    def _estimate_pixel_jacobian_inv(self) -> Tuple[Optional[np.ndarray], str]:
+        """
+        Estimate 2x2 Jacobian inverse mapping pixel delta -> robot (dx,dy) in target_frame.
+        Uses two small probe moves and YOLO 'jaco' pixel measurements.
+        Returns (J_inv, reason). If J_inv is None, reason explains why.
+        """
+        uv0 = self._get_gripper_uv()
+        if uv0 is None:
+            return None, "no gripper detection (class 'jaco')"
+        u0, v0 = float(uv0[0]), float(uv0[1])
+
+        s = float(self.servo_probe_step_m)
+        if s <= 1e-6:
+            return None, "probe_step_m too small"
+
+        # Probe x (try + then -)
+        sx = +s
+        if not self._execute_cartesian_delta_xy(+s, 0.0):
+            sx = -s
+            if not self._execute_cartesian_delta_xy(-s, 0.0):
+                return None, "probe move in X failed (cartesian+fallback plan)"
+        rospy.sleep(self.servo_settle_s)
+        uvx = self._get_gripper_uv()
+        if uvx is None:
+            return None, "gripper lost during X probe"
+        ux, vx = float(uvx[0]), float(uvx[1])
+        # Return
+        if not self._execute_cartesian_delta_xy(-sx, 0.0):
+            rospy.logwarn("pixel_servo: failed to return after X probe (continuing).")
+        rospy.sleep(self.servo_settle_s)
+
+        # Probe y (try + then -)
+        sy = +s
+        if not self._execute_cartesian_delta_xy(0.0, +s):
+            sy = -s
+            if not self._execute_cartesian_delta_xy(0.0, -s):
+                return None, "probe move in Y failed (cartesian+fallback plan)"
+        rospy.sleep(self.servo_settle_s)
+        uvy = self._get_gripper_uv()
+        if uvy is None:
+            return None, "gripper lost during Y probe"
+        uy, vy = float(uvy[0]), float(uvy[1])
+        # Return
+        if not self._execute_cartesian_delta_xy(0.0, -sy):
+            rospy.logwarn("pixel_servo: failed to return after Y probe (continuing).")
+        rospy.sleep(self.servo_settle_s)
+
+        # J maps [dx,dy] -> [du,dv]
+        du_dx = (ux - u0) / sx
+        dv_dx = (vx - v0) / sx
+        du_dy = (uy - u0) / sy
+        dv_dy = (vy - v0) / sy
+        J = np.array([[du_dx, du_dy], [dv_dx, dv_dy]], dtype=np.float64)
+        det = float(np.linalg.det(J))
+        if abs(det) < 1e-9:
+            return None, "Jacobian singular (try increasing probe_step_m or ensure not at safety bounds)"
+        return np.linalg.inv(J), "ok"
+
+    def _pixel_servo_refine(self, obj: "ObjectState") -> Tuple[bool, str]:
+        """
+        After reaching grid-cell center, take a few small XY steps to reduce pixel error.
+        Stop early if the object becomes undetected (assume occluded => on top).
+        """
+        if not self.servo_enabled:
+            return True, "pixel_servo disabled"
+
+        # Expected object pixel from state_builder (smoothed)
+        try:
+            expected_uv = (float(obj.bbox_center_x), float(obj.bbox_center_y))
+        except Exception:
+            expected_uv = (0.0, 0.0)
+        grid_label = getattr(obj, "grid_label", "")
+
+        J_inv, reason = self._estimate_pixel_jacobian_inv()
+        if J_inv is None:
+            return True, f"pixel_servo skipped ({reason})"
+
+        missing = 0
+        for k in range(max(0, int(self.servo_max_steps))):
+            uv_g = self._get_gripper_uv()
+            if uv_g is None:
+                return True, "pixel_servo stopped (gripper not detected)"
+
+            uv_o = self._find_object_uv(grid_label, expected_uv)
+            if uv_o is None:
+                missing += 1
+                if missing >= int(self.servo_missing_stop):
+                    return True, "pixel_servo stop: object occluded (assume on top)"
+                rospy.sleep(self.servo_settle_s)
+                continue
+
+            missing = 0
+            expected_uv = uv_o  # update expected
+
+            e = np.array([float(uv_o[0] - uv_g[0]), float(uv_o[1] - uv_g[1])], dtype=np.float64)
+            if float(np.linalg.norm(e)) <= float(self.servo_pixel_tol):
+                return True, "pixel_servo done: within tolerance"
+
+            dxy = J_inv @ e
+            dx = float(self.servo_gain) * float(dxy[0])
+            dy = float(self.servo_gain) * float(dxy[1])
+
+            # Clamp per-step motion
+            step = float(np.sqrt(dx * dx + dy * dy))
+            max_step = float(self.servo_max_step_m)
+            if step > max_step and step > 1e-9:
+                scale = max_step / step
+                dx *= scale
+                dy *= scale
+
+            ok = self._execute_cartesian_delta_xy(dx, dy)
+            rospy.sleep(self.servo_settle_s)
+            if not ok:
+                return True, "pixel_servo stopped (Cartesian step failed)"
+
+        return True, "pixel_servo done: max_steps reached"
 
     def _add_safety_walls(self):
         """
@@ -464,7 +766,9 @@ class ToolExecutor:
                 self.arm_group.stop()
                 self.arm_group.clear_pose_targets()
                 if success:
-                    return True, f"Approached {object_id} (cartesian)"
+                    # Pixel-servo refinement (best-effort)
+                    ok, msg = self._pixel_servo_refine(obj)
+                    return True, f"Approached {object_id} (cartesian); {msg}"
                 return False, f"Cartesian plan found but failed to execute path to {object_id}"
             else:
                 rospy.logwarn(f"APPROACH: Cartesian path fraction={fraction:.2f} ({npts} pts). Falling back to planner.")
@@ -507,7 +811,8 @@ class ToolExecutor:
         self.arm_group.clear_pose_targets()
         
         if success:
-            return True, f"Approached {object_id}"
+            ok, msg = self._pixel_servo_refine(obj)
+            return True, f"Approached {object_id}; {msg}"
         else:
             return False, f"Planned but failed to execute path to {object_id}"
     

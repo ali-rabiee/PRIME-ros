@@ -104,6 +104,16 @@ tools:
   approach:
     pre_grasp_distance: 0.10  # meters above object
     approach_speed: 0.1  # m/s
+    # Pixel-servo refinement (after reaching grid-cell center)
+    pixel_servo:
+      enabled: true
+      max_steps: 5
+      pixel_tolerance: 15          # stop if |pixel error| <= this
+      gain: 0.6                    # scales commanded XY step
+      max_step_m: 0.01             # clamp each servo move to this (meters)
+      probe_step_m: 0.01           # small move used to estimate pixel Jacobian (meters)
+      settle_time_s: 0.20          # wait after each move for YOLO to update
+      missing_object_stop_frames: 2  # if target object isn't detected for N cycles, stop (assume occluded)
   align:
     tolerance: 0.1  # radians
   grasp:

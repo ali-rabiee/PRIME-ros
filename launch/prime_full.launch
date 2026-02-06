@@ -9,7 +9,11 @@
   <arg name="color_height" default="720"/>
   <arg name="color_fps" default="30"/>
 
-  <!-- YOLO grid crop (inside workspace bbox) -->
+  <!-- YOLO grid crop (inside workspace bbox)
+       By default we do NOT set these params here, so `yolo_node.py`'s built-in
+       defaults (rospy.get_param("~grid_crop_*", ...)) take effect.
+       If you want to override from launch, set set_yolo_grid_crop:=true. -->
+  <arg name="set_yolo_grid_crop" default="false"/>
   <arg name="grid_crop_top_ratio" default="0.5"/>
   <arg name="grid_crop_bottom_ratio" default="0.0"/>
   <!-- If true, connects robot TF tree to camera_link (ONLY if you have correct extrinsics).
@@ -31,8 +35,8 @@
 
   <!-- 3) YOLO detection -->
   <node pkg="yolo-ros" type="yolo_node.py" name="yolo_node" output="screen">
-    <param name="grid_crop_top_ratio" value="$(arg grid_crop_top_ratio)"/>
-    <param name="grid_crop_bottom_ratio" value="$(arg grid_crop_bottom_ratio)"/>
+    <param if="$(arg set_yolo_grid_crop)" name="grid_crop_top_ratio" value="$(arg grid_crop_top_ratio)"/>
+    <param if="$(arg set_yolo_grid_crop)" name="grid_crop_bottom_ratio" value="$(arg grid_crop_bottom_ratio)"/>
   </node>
 
   <!-- 4) Connect TF trees so MoveIt ('world' frame) can see everything.
