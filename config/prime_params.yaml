@@ -21,7 +21,7 @@ workspace:
   object_z: 0.36
   # Flip grid-to-metric mapping direction without changing the rectangle itself.
   # [-1, 1, 1] = flip left/right (A1<->A3), [1,-1,1] = flip top/bottom (A*<->C*), [-1,-1,1] = both
-  axis_signs: [-1.0, -1.0, 1.0]
+  axis_signs: [-1.0, 1.0, 1.0]
 
 # Safety boundary — hard motion limits (recommended ON for real robot)
 # MoveIt tool calls are clamped to these bounds. Can be wider than workspace.
