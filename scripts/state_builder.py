@@ -78,6 +78,19 @@ class StateBuilder:
         self.track_max_age = float(rospy.get_param("state_builder/track_max_age", 1.0))  # seconds
         self.track_max_pixel_dist = float(rospy.get_param("state_builder/track_max_pixel_dist", 80.0))  # px
         self.track_smoothing_alpha = float(rospy.get_param("state_builder/track_smoothing_alpha", 0.35))
+        # If objects are mostly static during an episode, persisting tracks prevents ID churn
+        # when an object is briefly occluded.
+        self.persist_tracks = bool(rospy.get_param("state_builder/persist_tracks", True))
+        # If >0, forget tracks not seen for this many seconds. If 0, never forget.
+        self.forget_tracks_after = float(rospy.get_param("state_builder/forget_tracks_after", 0.0))
+        # If true, publish tracks even if not recently seen (assumes static scene).
+        self.publish_stale_tracks = bool(rospy.get_param("state_builder/publish_stale_tracks", True))
+        # Prevent "one-frame false positives" from becoming permanent:
+        # - New tracks start as tentative.
+        # - A track becomes confirmed after N matched detections.
+        self.track_min_confirmations = int(rospy.get_param("state_builder/track_min_confirmations", 3))
+        self.track_tentative_ttl = float(rospy.get_param("state_builder/track_tentative_ttl", 2.0))  # seconds
+        self.publish_tentative_tracks = bool(rospy.get_param("state_builder/publish_tentative_tracks", False))
         self.tracks: Dict[str, dict] = {}
         self.next_track_id = 1
 
@@ -218,10 +231,25 @@ class StateBuilder:
 
         now = rospy.Time.now().to_sec()
 
-        # Expire stale tracks
-        for oid in list(self.tracks.keys()):
-            if (now - float(self.tracks[oid].get("last_seen", 0.0))) > self.track_max_age:
-                del self.tracks[oid]
+        # Expire stale tracks (optional)
+        if self.persist_tracks:
+            # Always prune tentative tracks that never got confirmed
+            for oid in list(self.tracks.keys()):
+                tr = self.tracks.get(oid, {})
+                if not bool(tr.get("confirmed", False)):
+                    first_seen = float(tr.get("first_seen", tr.get("last_seen", now)))
+                    if (now - first_seen) > self.track_tentative_ttl and int(tr.get("hits", 0)) < self.track_min_confirmations:
+                        del self.tracks[oid]
+                        continue
+
+            if self.forget_tracks_after > 0.0:
+                for oid in list(self.tracks.keys()):
+                    if (now - float(self.tracks[oid].get("last_seen", 0.0))) > self.forget_tracks_after:
+                        del self.tracks[oid]
+        else:
+            for oid in list(self.tracks.keys()):
+                if (now - float(self.tracks[oid].get("last_seen", 0.0))) > self.track_max_age:
+                    del self.tracks[oid]
 
         # Measurements
         measured = []
@@ -280,6 +308,9 @@ class StateBuilder:
                 tr["grid_row"] = int(m["grid_row"])
                 tr["grid_col"] = int(m["grid_col"])
                 tr["last_seen"] = now
+                tr["hits"] = int(tr.get("hits", 1)) + 1
+                if int(tr.get("hits", 0)) >= self.track_min_confirmations:
+                    tr["confirmed"] = True
                 unmatched_tracks.remove(best_oid)
             else:
                 oid = f"obj_{self.next_track_id}"
@@ -293,12 +324,17 @@ class StateBuilder:
                     "grid_row": int(m["grid_row"]),
                     "grid_col": int(m["grid_col"]),
                     "last_seen": now,
+                    "first_seen": now,
+                    "hits": 1,
+                    "confirmed": True if self.track_min_confirmations <= 1 else False,
                 }
 
         # Build ObjectState outputs
         objects: Dict[str, ObjectState] = {}
         for oid, tr in self.tracks.items():
-            if (now - float(tr.get("last_seen", 0.0))) > self.track_max_age:
+            if (not self.publish_stale_tracks) and ((now - float(tr.get("last_seen", 0.0))) > self.track_max_age):
+                continue
+            if (not bool(tr.get("confirmed", False))) and (not self.publish_tentative_tracks):
                 continue
             obj = ObjectState()
             obj.object_id = oid

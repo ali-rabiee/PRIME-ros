@@ -59,9 +59,18 @@ state_builder:
   position_threshold: 0.02  # meters, minimum movement to update history
   # Stabilization for YOLO detections -> PRIME objects
   min_object_confidence: 0.5
-  track_max_age: 1.0            # seconds (keeps IDs stable through brief misses)
+  # If publish_stale_tracks=false, tracks not seen for track_max_age seconds won't be published.
+  track_max_age: 1.0            # seconds
   track_max_pixel_dist: 80.0    # pixels (matching radius for tracking)
   track_smoothing_alpha: 0.35   # 0..1 (EMA smoothing on position/centroid)
+  # Keep object IDs stable through occlusions (recommended when objects are static during an episode)
+  persist_tracks: true
+  publish_stale_tracks: true
+  forget_tracks_after: 30.0     # seconds; 0.0 = never forget
+  # Do not create permanent objects from one-frame false positives
+  track_min_confirmations: 3    # detections before an object becomes "real"
+  track_tentative_ttl: 2.0      # seconds allowed to reach confirmations
+  publish_tentative_tracks: false
 
 # Candidate selection parameters
 candidates:
