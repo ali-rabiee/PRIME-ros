@@ -258,6 +258,27 @@ class ToolExecutor:
         det = self._get_best_det("jaco")
         return self._det_pick_xy(det)
 
+    def _wait_for_fresh_yolo(self, timeout: float = 2.0) -> bool:
+        """
+        Block until a YOLO detection with a newer timestamp arrives.
+        This ensures we read pixels AFTER the arm has moved, not stale cached data.
+        Returns True if fresh data arrived, False on timeout.
+        """
+        with self.lock:
+            old_stamp = self._latest_yolo_stamp
+        deadline = rospy.Time.now().to_sec() + timeout
+        rate = rospy.Rate(30)  # poll at 30 Hz
+        while not rospy.is_shutdown():
+            now = rospy.Time.now().to_sec()
+            if now > deadline:
+                rospy.logwarn("pixel_servo: timed out waiting for fresh YOLO frame (%.1fs)", timeout)
+                return False
+            with self.lock:
+                if self._latest_yolo_stamp > old_stamp:
+                    return True
+            rate.sleep()
+        return False
+
     def _find_object_uv(self, obj_grid_label: str, expected_uv: Tuple[float, float], max_px_dist: float = 200.0):
         """
         Find the current YOLO detection for the target object.
@@ -297,6 +318,7 @@ class ToolExecutor:
         try:
             current = self.arm_group.get_current_pose().pose
         except Exception:
+            rospy.logwarn("pixel_servo: cannot read current pose")
             return False
 
         target = Pose()
@@ -315,21 +337,34 @@ class ToolExecutor:
         dx_eff = float(target.position.x - current.position.x)
         dy_eff = float(target.position.y - current.position.y)
         if abs(dx_eff) + abs(dy_eff) < 1e-6:
+            rospy.logwarn("pixel_servo: delta_xy no-op after clamping (dx_eff=%.6f, dy_eff=%.6f)", dx_eff, dy_eff)
             return False
+
+        rospy.loginfo("pixel_servo: cartesian delta dx=%.4f dy=%.4f -> target (%.4f, %.4f, %.4f)",
+                      dx_eff, dy_eff, target.position.x, target.position.y, target.position.z)
 
         try:
             self.arm_group.set_start_state_to_current_state()
         except Exception:
             pass
         try:
-            plan, fraction = self.arm_group.compute_cartesian_path([current, target], eef_step=0.005, jump_threshold=0.0)
-            if fraction >= float(min_fraction) and plan is not None and len(plan.joint_trajectory.points) > 0:
+            # NOTE: only pass [target] as waypoints — do NOT include current pose
+            plan, fraction = self.arm_group.compute_cartesian_path([target], eef_step=0.005, jump_threshold=0.0)
+            n_pts = len(plan.joint_trajectory.points) if plan is not None else 0
+            rospy.loginfo("pixel_servo: cartesian path fraction=%.3f n_pts=%d", fraction, n_pts)
+            if fraction >= float(min_fraction) and plan is not None and n_pts > 0:
                 ok = self.arm_group.execute(plan, wait=True)
                 self.arm_group.stop()
                 self.arm_group.clear_pose_targets()
+                if ok:
+                    rospy.loginfo("pixel_servo: cartesian move executed OK")
+                else:
+                    rospy.logwarn("pixel_servo: cartesian execute returned False")
                 return bool(ok)
-        except Exception:
-            pass
+            else:
+                rospy.logwarn("pixel_servo: cartesian path insufficient (fraction=%.3f), trying fallback plan", fraction)
+        except Exception as ex:
+            rospy.logwarn("pixel_servo: cartesian path exception: %s, trying fallback", str(ex))
 
         # Fallback: plan to the same pose (still keeps orientation)
         try:
@@ -361,11 +396,13 @@ class ToolExecutor:
 
             if not plan_success:
                 self.arm_group.clear_pose_targets()
+                rospy.logwarn("pixel_servo: fallback plan also failed")
                 return False
 
             ok = self.arm_group.execute(traj, wait=True)
             self.arm_group.stop()
             self.arm_group.clear_pose_targets()
+            rospy.loginfo("pixel_servo: fallback plan executed, ok=%s", str(ok))
             return bool(ok)
         except Exception:
             try:
@@ -385,42 +422,59 @@ class ToolExecutor:
         if uv0 is None:
             return None, "no gripper detection (class 'jaco')"
         u0, v0 = float(uv0[0]), float(uv0[1])
+        rospy.loginfo("pixel_servo Jacobian: gripper start pixel (%.0f, %.0f)", u0, v0)
 
         s = float(self.servo_probe_step_m)
         if s <= 1e-6:
             return None, "probe_step_m too small"
 
         # Probe x (try + then -)
+        rospy.loginfo("pixel_servo Jacobian: probing X with step %.4f m", s)
         sx = +s
         if not self._execute_cartesian_delta_xy(+s, 0.0):
             sx = -s
             if not self._execute_cartesian_delta_xy(-s, 0.0):
                 return None, "probe move in X failed (cartesian+fallback plan)"
         rospy.sleep(self.servo_settle_s)
+        self._wait_for_fresh_yolo(timeout=2.0)
         uvx = self._get_gripper_uv()
         if uvx is None:
             return None, "gripper lost during X probe"
         ux, vx = float(uvx[0]), float(uvx[1])
+        rospy.loginfo("pixel_servo Jacobian: after X probe pixel (%.0f, %.0f), delta=(%.1f, %.1f) px for %.4f m",
+                      ux, vx, ux - u0, vx - v0, sx)
         # Return
         if not self._execute_cartesian_delta_xy(-sx, 0.0):
             rospy.logwarn("pixel_servo: failed to return after X probe (continuing).")
         rospy.sleep(self.servo_settle_s)
+        self._wait_for_fresh_yolo(timeout=2.0)
+
+        # Re-read baseline after returning (arm might not return to exact same spot)
+        uv0_new = self._get_gripper_uv()
+        if uv0_new is not None:
+            u0, v0 = float(uv0_new[0]), float(uv0_new[1])
+            rospy.loginfo("pixel_servo Jacobian: re-baseline after X return: (%.0f, %.0f)", u0, v0)
 
         # Probe y (try + then -)
+        rospy.loginfo("pixel_servo Jacobian: probing Y with step %.4f m", s)
         sy = +s
         if not self._execute_cartesian_delta_xy(0.0, +s):
             sy = -s
             if not self._execute_cartesian_delta_xy(0.0, -s):
                 return None, "probe move in Y failed (cartesian+fallback plan)"
         rospy.sleep(self.servo_settle_s)
+        self._wait_for_fresh_yolo(timeout=2.0)
         uvy = self._get_gripper_uv()
         if uvy is None:
             return None, "gripper lost during Y probe"
         uy, vy = float(uvy[0]), float(uvy[1])
+        rospy.loginfo("pixel_servo Jacobian: after Y probe pixel (%.0f, %.0f), delta=(%.1f, %.1f) px for %.4f m",
+                      uy, vy, uy - u0, vy - v0, sy)
         # Return
         if not self._execute_cartesian_delta_xy(0.0, -sy):
             rospy.logwarn("pixel_servo: failed to return after Y probe (continuing).")
         rospy.sleep(self.servo_settle_s)
+        self._wait_for_fresh_yolo(timeout=2.0)
 
         # J maps [dx,dy] -> [du,dv]
         du_dx = (ux - u0) / sx
@@ -429,9 +483,14 @@ class ToolExecutor:
         dv_dy = (vy - v0) / sy
         J = np.array([[du_dx, du_dy], [dv_dx, dv_dy]], dtype=np.float64)
         det = float(np.linalg.det(J))
+        rospy.loginfo("pixel_servo Jacobian: J=[[%.1f,%.1f],[%.1f,%.1f]] det=%.3f",
+                      du_dx, du_dy, dv_dx, dv_dy, det)
         if abs(det) < 1e-9:
-            return None, "Jacobian singular (try increasing probe_step_m or ensure not at safety bounds)"
-        return np.linalg.inv(J), "ok"
+            return None, "Jacobian singular (det=%.6f; try increasing probe_step_m or ensure not at safety bounds)" % det
+        J_inv = np.linalg.inv(J)
+        rospy.loginfo("pixel_servo Jacobian: J_inv=[[%.6f,%.6f],[%.6f,%.6f]]",
+                      J_inv[0, 0], J_inv[0, 1], J_inv[1, 0], J_inv[1, 1])
+        return J_inv, "ok"
 
     def _pixel_servo_refine(self, obj: "ObjectState") -> Tuple[bool, str]:
         """
@@ -448,6 +507,9 @@ class ToolExecutor:
             expected_uv = (0.0, 0.0)
         grid_label = getattr(obj, "grid_label", "")
 
+        rospy.loginfo("pixel_servo: starting refinement for %s (expected_uv=(%.0f,%.0f), grid=%s)",
+                      obj.object_id, expected_uv[0], expected_uv[1], grid_label)
+
         J_inv, reason = self._estimate_pixel_jacobian_inv()
         if J_inv is None:
             return True, f"pixel_servo skipped ({reason})"
@@ -456,11 +518,14 @@ class ToolExecutor:
         for k in range(max(0, int(self.servo_max_steps))):
             uv_g = self._get_gripper_uv()
             if uv_g is None:
+                rospy.logwarn("pixel_servo step %d: gripper not detected", k)
                 return True, "pixel_servo stopped (gripper not detected)"
 
             uv_o = self._find_object_uv(grid_label, expected_uv)
             if uv_o is None:
                 missing += 1
+                rospy.loginfo("pixel_servo step %d: object not detected (missing=%d/%d)",
+                              k, missing, int(self.servo_missing_stop))
                 if missing >= int(self.servo_missing_stop):
                     return True, "pixel_servo stop: object occluded (assume on top)"
                 rospy.sleep(self.servo_settle_s)
@@ -470,7 +535,11 @@ class ToolExecutor:
             expected_uv = uv_o  # update expected
 
             e = np.array([float(uv_o[0] - uv_g[0]), float(uv_o[1] - uv_g[1])], dtype=np.float64)
-            if float(np.linalg.norm(e)) <= float(self.servo_pixel_tol):
+            err_px = float(np.linalg.norm(e))
+            rospy.loginfo("pixel_servo step %d: gripper=(%.0f,%.0f) object=(%.0f,%.0f) error=%.1f px",
+                          k, uv_g[0], uv_g[1], uv_o[0], uv_o[1], err_px)
+            if err_px <= float(self.servo_pixel_tol):
+                rospy.loginfo("pixel_servo step %d: within tolerance (%.1f <= %.1f)", k, err_px, self.servo_pixel_tol)
                 return True, "pixel_servo done: within tolerance"
 
             dxy = J_inv @ e
@@ -485,9 +554,14 @@ class ToolExecutor:
                 dx *= scale
                 dy *= scale
 
+            rospy.loginfo("pixel_servo step %d: commanding dx=%.4f dy=%.4f m (raw_step=%.4f, max=%.4f)",
+                          k, dx, dy, step, max_step)
+
             ok = self._execute_cartesian_delta_xy(dx, dy)
             rospy.sleep(self.servo_settle_s)
+            self._wait_for_fresh_yolo(timeout=2.0)
             if not ok:
+                rospy.logwarn("pixel_servo step %d: Cartesian step failed", k)
                 return True, "pixel_servo stopped (Cartesian step failed)"
 
         return True, "pixel_servo done: max_steps reached"

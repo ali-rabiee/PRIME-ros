@@ -115,12 +115,12 @@ tools:
     # Pixel-servo refinement (after reaching grid-cell center)
     pixel_servo:
       enabled: true
-      max_steps: 5
+      max_steps: 8
       pixel_tolerance: 15          # stop if |pixel error| <= this
       gain: 0.6                    # scales commanded XY step
-      max_step_m: 0.01             # clamp each servo move to this (meters)
-      probe_step_m: 0.01           # small move used to estimate pixel Jacobian (meters)
-      settle_time_s: 0.20          # wait after each move for YOLO to update
+      max_step_m: 0.03             # clamp each servo move to this (meters) — 3cm per step
+      probe_step_m: 0.05           # small move used to estimate pixel Jacobian (meters) — 5cm probe
+      settle_time_s: 0.50          # wait after each move for arm to settle (fresh YOLO is also awaited separately)
       missing_object_stop_frames: 2  # if target object isn't detected for N cycles, stop (assume occluded)
   align:
     tolerance: 0.1  # radians
