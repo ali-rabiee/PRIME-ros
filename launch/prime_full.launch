@@ -1,32 +1,66 @@
 <?xml version="1.0"?>
 <launch>
-  <!-- Full PRIME system launch including robot and perception -->
-  
-  <!-- Arguments -->
+  <!-- PRIME full stack (NO AprilTags). Grid-only + MoveIt tool calls. -->
+
   <arg name="robot_type" default="j2n6s300"/>
-  <arg name="use_rviz" default="true"/>
-  
-  <!-- 1. Launch Kinova robot driver -->
+
+  <!-- RealSense color stream tuning -->
+  <arg name="color_width" default="1280"/>
+  <arg name="color_height" default="720"/>
+  <arg name="color_fps" default="30"/>
+
+  <!-- YOLO grid crop (inside workspace bbox)
+       By default we do NOT set these params here, so `yolo_node.py`'s built-in
+       defaults (rospy.get_param("~grid_crop_*", ...)) take effect.
+       If you want to override from launch, set set_yolo_grid_crop:=true. -->
+  <arg name="set_yolo_grid_crop" default="false"/>
+  <arg name="grid_crop_top_ratio" default="0.5"/>
+  <arg name="grid_crop_bottom_ratio" default="0.0"/>
+  <!-- If true, connects robot TF tree to camera_link (ONLY if you have correct extrinsics).
+       Leaving this false avoids MoveIt/octomap using a wrong transform. -->
+  <arg name="connect_camera_tf" default="false"/>
+
+  <!-- 1) Kinova robot driver -->
   <include file="$(find kinova_bringup)/launch/kinova_robot.launch">
     <arg name="kinova_robotType" value="$(arg robot_type)"/>
   </include>
-  
-  <!-- 2. Launch RealSense camera -->
+
+  <!-- 2) RealSense camera -->
   <include file="$(find realsense2_camera)/launch/rs_camera.launch">
     <arg name="align_depth" value="true"/>
+    <arg name="color_width" value="$(arg color_width)"/>
+    <arg name="color_height" value="$(arg color_height)"/>
+    <arg name="color_fps" value="$(arg color_fps)"/>
   </include>
-  
-  <!-- 3. Launch YOLO detection node -->
-  <include file="$(find yolo-ros)/launch/yolo_realsense.launch"/>
-  
-  <!-- 4. Launch MoveIt for motion planning -->
+
+  <!-- 3) YOLO detection -->
+  <node pkg="yolo-ros" type="yolo_node.py" name="yolo_node" output="screen">
+    <param if="$(arg set_yolo_grid_crop)" name="grid_crop_top_ratio" value="$(arg grid_crop_top_ratio)"/>
+    <param if="$(arg set_yolo_grid_crop)" name="grid_crop_bottom_ratio" value="$(arg grid_crop_bottom_ratio)"/>
+  </node>
+
+  <!-- 4) Connect TF trees so MoveIt ('world' frame) can see everything.
+       Kinova publishes in 'j2n6s300_link_base' which equals 'world'. -->
+  <node pkg="tf2_ros" type="static_transform_publisher" name="world_to_base_link"
+        args="0 0 0 0 0 0 world j2n6s300_link_base" />
+
+  <!-- OPTIONAL: Connect camera TF tree to robot tree.
+       WARNING: do NOT use an identity transform here on a real system; it can create phantom
+       collisions (octomap) and break planning. Only enable if you have correct camera extrinsics. -->
+  <node pkg="tf2_ros" type="static_transform_publisher" name="base_to_camera_link"
+        if="$(arg connect_camera_tf)"
+        args="0 0 0 0 0 0 j2n6s300_link_base camera_link" />
+
+  <!-- 5) MoveIt -->
   <include file="$(find j2n6s300_moveit_config)/launch/j2n6s300_demo.launch">
-    <arg name="use_rviz" value="$(arg use_rviz)"/>
+    <!-- j2n6s300_demo.launch always starts RViz; no use_rviz arg -->
   </include>
-  
-  <!-- 5. Launch PRIME system -->
+
+  <!-- 6) PRIME system -->
   <include file="$(find prime_ros)/launch/prime.launch">
     <arg name="robot_type" value="$(arg robot_type)"/>
+    <arg name="start_llm" value="false"/>
   </include>
 
 </launch>
+

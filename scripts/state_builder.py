@@ -46,27 +46,25 @@ class StateBuilder:
 
         # Robot / frames
         self.robot_type = rospy.get_param("robot/type", "j2n6s300")
-        self.state_frame_id = rospy.get_param("~state_frame_id", rospy.get_param("workspace_metric/frame_id", "root"))
+        self.state_frame_id = rospy.get_param("~state_frame_id", rospy.get_param("workspace/frame_id", "root"))
 
-        # Workspace (grid only)
+        # Workspace — grid dimensions + metric rectangle for grid cell centers
         self.grid_rows = int(rospy.get_param("workspace/grid_rows", 3))
         self.grid_cols = int(rospy.get_param("workspace/grid_cols", 3))
-
-        # Metric mapping from grid -> (x,y,z)
-        self.metric_enabled = bool(rospy.get_param("workspace_metric/enabled", True))
-        self.metric_frame_id = rospy.get_param("workspace_metric/frame_id", "root")
-        use_safety_xy = bool(rospy.get_param("workspace_metric/use_safety_bounds_xy", True))
-        if use_safety_xy:
-            self.metric_x_min = float(rospy.get_param("safety_bounds/x_min"))
-            self.metric_x_max = float(rospy.get_param("safety_bounds/x_max"))
-            self.metric_y_min = float(rospy.get_param("safety_bounds/y_min"))
-            self.metric_y_max = float(rospy.get_param("safety_bounds/y_max"))
-        else:
-            self.metric_x_min = float(rospy.get_param("workspace_metric/x_min"))
-            self.metric_x_max = float(rospy.get_param("workspace_metric/x_max"))
-            self.metric_y_min = float(rospy.get_param("workspace_metric/y_min"))
-            self.metric_y_max = float(rospy.get_param("workspace_metric/y_max"))
-        self.metric_object_z = float(rospy.get_param("workspace_metric/object_z", 0.0))
+        self.metric_frame_id = rospy.get_param("workspace/frame_id", "root")
+        self.metric_x_min = float(rospy.get_param("workspace/x_min"))
+        self.metric_x_max = float(rospy.get_param("workspace/x_max"))
+        self.metric_y_min = float(rospy.get_param("workspace/y_min"))
+        self.metric_y_max = float(rospy.get_param("workspace/y_max"))
+        self.metric_object_z = float(rospy.get_param("workspace/object_z", 0.0))
+        axis_signs = rospy.get_param("workspace/axis_signs", [1.0, 1.0, 1.0])
+        try:
+            axis_signs = list(axis_signs)
+        except Exception:
+            axis_signs = [1.0, 1.0, 1.0]
+        while len(axis_signs) < 3:
+            axis_signs.append(1.0)
+        self.metric_axis_signs = [float(axis_signs[0]), float(axis_signs[1]), float(axis_signs[2])]
 
         # State builder parameters
         self.update_rate = float(rospy.get_param("state_builder/update_rate", 10.0))
@@ -78,6 +76,19 @@ class StateBuilder:
         self.track_max_age = float(rospy.get_param("state_builder/track_max_age", 1.0))  # seconds
         self.track_max_pixel_dist = float(rospy.get_param("state_builder/track_max_pixel_dist", 80.0))  # px
         self.track_smoothing_alpha = float(rospy.get_param("state_builder/track_smoothing_alpha", 0.35))
+        # If objects are mostly static during an episode, persisting tracks prevents ID churn
+        # when an object is briefly occluded.
+        self.persist_tracks = bool(rospy.get_param("state_builder/persist_tracks", True))
+        # If >0, forget tracks not seen for this many seconds. If 0, never forget.
+        self.forget_tracks_after = float(rospy.get_param("state_builder/forget_tracks_after", 0.0))
+        # If true, publish tracks even if not recently seen (assumes static scene).
+        self.publish_stale_tracks = bool(rospy.get_param("state_builder/publish_stale_tracks", True))
+        # Prevent "one-frame false positives" from becoming permanent:
+        # - New tracks start as tentative.
+        # - A track becomes confirmed after N matched detections.
+        self.track_min_confirmations = int(rospy.get_param("state_builder/track_min_confirmations", 3))
+        self.track_tentative_ttl = float(rospy.get_param("state_builder/track_tentative_ttl", 2.0))  # seconds
+        self.publish_tentative_tracks = bool(rospy.get_param("state_builder/publish_tentative_tracks", False))
         self.tracks: Dict[str, dict] = {}
         self.next_track_id = 1
 
@@ -117,16 +128,22 @@ class StateBuilder:
         # Timer
         self.timer = rospy.Timer(rospy.Duration(1.0 / max(1e-3, self.update_rate)), self.update_state)
 
-        rospy.loginfo("State Builder initialized (NO AprilTags).")
+        rospy.loginfo("State Builder initialized.")
         rospy.loginfo(
-            "Metric grid mapping: enabled=%s frame=%s x[%.3f,%.3f] y[%.3f,%.3f] object_z=%.3f",
-            str(self.metric_enabled),
+            "Workspace grid: %dx%d  frame=%s  x[%.3f,%.3f] y[%.3f,%.3f] object_z=%.3f",
+            self.grid_rows, self.grid_cols,
             str(self.metric_frame_id),
             self.metric_x_min,
             self.metric_x_max,
             self.metric_y_min,
             self.metric_y_max,
             self.metric_object_z,
+        )
+        rospy.loginfo(
+            "Metric axis_signs: [%.1f, %.1f, %.1f] (negative flips grid-to-metric direction)",
+            self.metric_axis_signs[0],
+            self.metric_axis_signs[1],
+            self.metric_axis_signs[2],
         )
 
     # -----------------------
@@ -203,6 +220,14 @@ class StateBuilder:
         """Map (row,col) to metric (x,y) center within the configured rectangle."""
         row = int(np.clip(row, 0, self.grid_rows - 1))
         col = int(np.clip(col, 0, self.grid_cols - 1))
+
+        # If axis_signs is negative, reverse which grid index maps to min/max along that axis.
+        # This is safer than multiplying coordinates by -1 because it stays inside the same rectangle.
+        if self.metric_axis_signs[0] < 0.0:
+            col = (self.grid_cols - 1) - col
+        if self.metric_axis_signs[1] < 0.0:
+            row = (self.grid_rows - 1) - row
+
         x = self.metric_x_min + (col + 0.5) * (self.metric_x_max - self.metric_x_min) / float(self.grid_cols)
         y = self.metric_y_min + (row + 0.5) * (self.metric_y_max - self.metric_y_min) / float(self.grid_rows)
         return float(x), float(y)
@@ -218,10 +243,25 @@ class StateBuilder:
 
         now = rospy.Time.now().to_sec()
 
-        # Expire stale tracks
-        for oid in list(self.tracks.keys()):
-            if (now - float(self.tracks[oid].get("last_seen", 0.0))) > self.track_max_age:
-                del self.tracks[oid]
+        # Expire stale tracks (optional)
+        if self.persist_tracks:
+            # Always prune tentative tracks that never got confirmed
+            for oid in list(self.tracks.keys()):
+                tr = self.tracks.get(oid, {})
+                if not bool(tr.get("confirmed", False)):
+                    first_seen = float(tr.get("first_seen", tr.get("last_seen", now)))
+                    if (now - first_seen) > self.track_tentative_ttl and int(tr.get("hits", 0)) < self.track_min_confirmations:
+                        del self.tracks[oid]
+                        continue
+
+            if self.forget_tracks_after > 0.0:
+                for oid in list(self.tracks.keys()):
+                    if (now - float(self.tracks[oid].get("last_seen", 0.0))) > self.forget_tracks_after:
+                        del self.tracks[oid]
+        else:
+            for oid in list(self.tracks.keys()):
+                if (now - float(self.tracks[oid].get("last_seen", 0.0))) > self.track_max_age:
+                    del self.tracks[oid]
 
         # Measurements
         measured = []
@@ -280,6 +320,9 @@ class StateBuilder:
                 tr["grid_row"] = int(m["grid_row"])
                 tr["grid_col"] = int(m["grid_col"])
                 tr["last_seen"] = now
+                tr["hits"] = int(tr.get("hits", 1)) + 1
+                if int(tr.get("hits", 0)) >= self.track_min_confirmations:
+                    tr["confirmed"] = True
                 unmatched_tracks.remove(best_oid)
             else:
                 oid = f"obj_{self.next_track_id}"
@@ -293,12 +336,17 @@ class StateBuilder:
                     "grid_row": int(m["grid_row"]),
                     "grid_col": int(m["grid_col"]),
                     "last_seen": now,
+                    "first_seen": now,
+                    "hits": 1,
+                    "confirmed": True if self.track_min_confirmations <= 1 else False,
                 }
 
         # Build ObjectState outputs
         objects: Dict[str, ObjectState] = {}
         for oid, tr in self.tracks.items():
-            if (now - float(tr.get("last_seen", 0.0))) > self.track_max_age:
+            if (not self.publish_stale_tracks) and ((now - float(tr.get("last_seen", 0.0))) > self.track_max_age):
+                continue
+            if (not bool(tr.get("confirmed", False))) and (not self.publish_tentative_tracks):
                 continue
             obj = ObjectState()
             obj.object_id = oid
@@ -308,11 +356,8 @@ class StateBuilder:
             obj.grid_col = int(tr.get("grid_col", 0))
             obj.grid_label = str(tr.get("grid_label", ""))
 
-            if self.metric_enabled:
-                x, y = self.grid_cell_center_xy(obj.grid_row, obj.grid_col)
-                obj.position = Point(x=x, y=y, z=float(self.metric_object_z))
-            else:
-                obj.position = Point(x=float("nan"), y=float("nan"), z=float("nan"))
+            x, y = self.grid_cell_center_xy(obj.grid_row, obj.grid_col)
+            obj.position = Point(x=x, y=y, z=float(self.metric_object_z))
 
             obj.yaw_orientation = 0.0
             obj.is_held = False
@@ -383,11 +428,11 @@ class StateBuilder:
         # Grid config
         state.grid_rows = self.grid_rows
         state.grid_cols = self.grid_cols
-        # Keep existing workspace bounds (used by UI/state text, not for metric tool calls)
-        state.workspace_x_min = float(rospy.get_param("workspace/x_min", 0.0))
-        state.workspace_x_max = float(rospy.get_param("workspace/x_max", 0.0))
-        state.workspace_y_min = float(rospy.get_param("workspace/y_min", 0.0))
-        state.workspace_y_max = float(rospy.get_param("workspace/y_max", 0.0))
+        # Workspace bounds (same as grid metric rectangle)
+        state.workspace_x_min = self.metric_x_min
+        state.workspace_x_max = self.metric_x_max
+        state.workspace_y_min = self.metric_y_min
+        state.workspace_y_max = self.metric_y_max
 
         return state
 
@@ -429,20 +474,25 @@ class StateBuilder:
     # Timer + service
     # -----------------------
     def update_state(self, _evt):
-        with self.lock:
-            objects = self.update_detected_objects_from_yolo()
-            state = self.build_symbolic_state(objects)
-            if state is not None and hasattr(self, "state_pub"):
-                self.state_pub.publish(state)
-            if state is not None and hasattr(self, "candidates_pub"):
-                ids, labels, confs, reason = self.compute_candidates(state)
-                cand = CandidateSet()
-                cand.header = Header(stamp=rospy.Time.now())
-                cand.candidate_ids = ids
-                cand.candidate_labels = labels
-                cand.confidence_scores = confs
-                cand.reasoning = reason
-                self.candidates_pub.publish(cand)
+        try:
+            with self.lock:
+                objects = self.update_detected_objects_from_yolo()
+                state = self.build_symbolic_state(objects)
+                if state is not None and hasattr(self, "state_pub"):
+                    self.state_pub.publish(state)
+                if state is not None and hasattr(self, "candidates_pub"):
+                    ids, labels, confs, reason = self.compute_candidates(state)
+                    cand = CandidateSet()
+                    cand.header = Header(stamp=rospy.Time.now())
+                    cand.candidate_ids = ids
+                    cand.candidate_labels = labels
+                    cand.confidence_scores = confs
+                    cand.reasoning = reason
+                    self.candidates_pub.publish(cand)
+        except Exception as e:
+            rospy.logerr("state_builder update_state crashed: %s", str(e))
+            import traceback
+            rospy.logerr(traceback.format_exc())
 
     def handle_get_state(self, _req):
         with self.lock:
