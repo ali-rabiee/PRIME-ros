@@ -356,11 +356,8 @@ class StateBuilder:
             obj.grid_col = int(tr.get("grid_col", 0))
             obj.grid_label = str(tr.get("grid_label", ""))
 
-            if self.metric_enabled:
-                x, y = self.grid_cell_center_xy(obj.grid_row, obj.grid_col)
-                obj.position = Point(x=x, y=y, z=float(self.metric_object_z))
-            else:
-                obj.position = Point(x=float("nan"), y=float("nan"), z=float("nan"))
+            x, y = self.grid_cell_center_xy(obj.grid_row, obj.grid_col)
+            obj.position = Point(x=x, y=y, z=float(self.metric_object_z))
 
             obj.yaw_orientation = 0.0
             obj.is_held = False
@@ -477,20 +474,25 @@ class StateBuilder:
     # Timer + service
     # -----------------------
     def update_state(self, _evt):
-        with self.lock:
-            objects = self.update_detected_objects_from_yolo()
-            state = self.build_symbolic_state(objects)
-            if state is not None and hasattr(self, "state_pub"):
-                self.state_pub.publish(state)
-            if state is not None and hasattr(self, "candidates_pub"):
-                ids, labels, confs, reason = self.compute_candidates(state)
-                cand = CandidateSet()
-                cand.header = Header(stamp=rospy.Time.now())
-                cand.candidate_ids = ids
-                cand.candidate_labels = labels
-                cand.confidence_scores = confs
-                cand.reasoning = reason
-                self.candidates_pub.publish(cand)
+        try:
+            with self.lock:
+                objects = self.update_detected_objects_from_yolo()
+                state = self.build_symbolic_state(objects)
+                if state is not None and hasattr(self, "state_pub"):
+                    self.state_pub.publish(state)
+                if state is not None and hasattr(self, "candidates_pub"):
+                    ids, labels, confs, reason = self.compute_candidates(state)
+                    cand = CandidateSet()
+                    cand.header = Header(stamp=rospy.Time.now())
+                    cand.candidate_ids = ids
+                    cand.candidate_labels = labels
+                    cand.confidence_scores = confs
+                    cand.reasoning = reason
+                    self.candidates_pub.publish(cand)
+        except Exception as e:
+            rospy.logerr("state_builder update_state crashed: %s", str(e))
+            import traceback
+            rospy.logerr(traceback.format_exc())
 
     def handle_get_state(self, _req):
         with self.lock:
