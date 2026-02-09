@@ -371,19 +371,20 @@ class GuiTeleopNode:
         self.rotation_frame = tk.Frame(buttons_frame)
         self.gripper_frame = tk.Frame(buttons_frame)
 
-        self._add_hold_button(self.translation_frame, "+X", "x", 1)
-        self._add_hold_button(self.translation_frame, "-X", "x", -1)
-        self._add_hold_button(self.translation_frame, "+Y", "y", 1)
-        self._add_hold_button(self.translation_frame, "-Y", "y", -1)
-        self._add_hold_button(self.translation_frame, "+Z", "z", 1)
-        self._add_hold_button(self.translation_frame, "-Z", "z", -1)
+        # Translation controls (semantics assume +X=forward, +Y=left, +Z=up).
+        self._add_hold_button(self.translation_frame, "Left", "x", 1)
+        self._add_hold_button(self.translation_frame, "Right", "x", -1)
+        self._add_hold_button(self.translation_frame, "Backward", "y", 1)
+        self._add_hold_button(self.translation_frame, "Forward", "y", -1)
+        self._add_hold_button(self.translation_frame, "Up", "z", 1)
+        self._add_hold_button(self.translation_frame, "Down", "z", -1)
 
-        self._add_hold_button(self.rotation_frame, "+Rx", "rx", 1)
-        self._add_hold_button(self.rotation_frame, "-Rx", "rx", -1)
-        self._add_hold_button(self.rotation_frame, "+Ry", "ry", 1)
-        self._add_hold_button(self.rotation_frame, "-Ry", "ry", -1)
-        self._add_hold_button(self.rotation_frame, "+Rz", "rz", 1)
-        self._add_hold_button(self.rotation_frame, "-Rz", "rz", -1)
+        self._add_hold_button(self.rotation_frame, "Down", "rx", 1)
+        self._add_hold_button(self.rotation_frame, "Up", "rx", -1)
+        self._add_hold_button(self.rotation_frame, "Left", "ry", 1)
+        self._add_hold_button(self.rotation_frame, "Right", "ry", -1)
+        self._add_hold_button(self.rotation_frame, "+Rot", "rz", 1)
+        self._add_hold_button(self.rotation_frame, "-Rot", "rz", -1)
 
         tk.Button(self.gripper_frame, text="Open", width=10, command=lambda: self._gripper_action("open")).pack(
             side=tk.LEFT, padx=4, pady=4
