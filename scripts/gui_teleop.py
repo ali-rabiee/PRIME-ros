@@ -2,8 +2,11 @@
 """GUI teleoperation for PRIME (replaces joystick pipeline)."""
 
 import json
+import os
+import sys
 import threading
 import time
+import uuid
 
 import actionlib
 import rospy
@@ -15,7 +18,34 @@ from kinova_msgs.msg import (
 )
 from std_msgs.msg import String
 
+# Ensure local PRIME scripts directory is on PYTHONPATH (rosrun wrapper doesn't add it)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
 from prime_ros.msg import ControlMode
+
+try:
+    from prime_ros.msg import SymbolicState, CandidateSet, ToolCall, PRIMEQuery, PRIMEResponse
+    PRIME_MSGS_AVAILABLE = True
+except Exception:
+    PRIME_MSGS_AVAILABLE = False
+
+try:
+    from oracle_assist import (
+        OracleState,
+        oracle_decide_tool,
+        validate_tool_call,
+        apply_oracle_user_reply,
+        choice_to_user_content,
+        strip_choice_label,
+        yaw_to_bin,
+        manhattan,
+    )
+    ORACLE_AVAILABLE = True
+except Exception as e:
+    ORACLE_AVAILABLE = False
+    ORACLE_IMPORT_ERROR = str(e)
 
 
 class TeleopCommandModel:
@@ -195,6 +225,19 @@ class GuiTeleopNode:
         self.home_done_param = str(rospy.get_param("~home_done_param", "/prime/homing_done"))
         self.home_wait_timeout = float(rospy.get_param("~home_wait_timeout", 0.0))  # 0 = wait forever
 
+        # Oracle assist config (GUI side panel)
+        self.oracle_enabled = bool(rospy.get_param("~oracle_enabled", True))
+        self.oracle_publish_query = bool(rospy.get_param("~oracle_publish_query", False))
+        self.oracle_publish_response = bool(rospy.get_param("~oracle_publish_response", False))
+        self.oracle_history_len = int(rospy.get_param("~oracle_history_len", 6))
+        self.oracle_z_min = float(rospy.get_param("safety_bounds/z_min", 0.2))
+        self.oracle_z_max = float(rospy.get_param("safety_bounds/z_max", 0.6))
+        self.oracle_enabled_requested = self.oracle_enabled
+        self.oracle_available = ORACLE_AVAILABLE
+        if not self.oracle_available:
+            rospy.logwarn("Oracle assist disabled: %s", ORACLE_IMPORT_ERROR)
+        self.oracle_enabled = self.oracle_enabled_requested and self.oracle_available
+
         # Kinova velocity control is designed around ~100Hz updates.
         if self.publish_rate < 90.0:
             rospy.logwarn("GUI teleop publish_rate=%.1fHz (Kinova recommends ~100Hz for velocity control)", self.publish_rate)
@@ -228,6 +271,28 @@ class GuiTeleopNode:
         if not self.finger_client.wait_for_server(rospy.Duration(2.0)):
             rospy.logwarn("Gripper action server unavailable on %s", self.finger_action_name)
 
+        # Oracle state + ROS plumbing
+        self.oracle_state = None
+        self.oracle_memory = None
+        self.oracle_objects = []
+        self.oracle_gripper_hist = []
+        self.oracle_choices = []
+        self.oracle_status_var = None
+        self.oracle_choices_frame = None
+        # final enable already computed above
+
+        self.oracle_tool_pub = None
+        self.oracle_query_pub = None
+        self.oracle_response_pub = None
+        if self.oracle_enabled and PRIME_MSGS_AVAILABLE:
+            self.oracle_tool_pub = rospy.Publisher("/prime/tool_call", ToolCall, queue_size=10)
+            if self.oracle_publish_query:
+                self.oracle_query_pub = rospy.Publisher("/prime/query", PRIMEQuery, queue_size=10)
+            if self.oracle_publish_response:
+                self.oracle_response_pub = rospy.Publisher("/prime/response", PRIMEResponse, queue_size=10)
+            rospy.Subscriber("/prime/symbolic_state", SymbolicState, self._oracle_state_callback, queue_size=1)
+            rospy.Subscriber("/prime/candidate_objects", CandidateSet, self._oracle_candidates_callback, queue_size=1)
+
         self.publish_timer = rospy.Timer(
             rospy.Duration(1.0 / max(1e-3, self.publish_rate)),
             self.publish_cycle,
@@ -241,6 +306,7 @@ class GuiTeleopNode:
         self.translation_frame = None
         self.rotation_frame = None
         self.gripper_frame = None
+        self.oracle_panel = None
 
         if not self.headless:
             self._init_gui()
@@ -288,6 +354,7 @@ class GuiTeleopNode:
         with self.lock:
             stop_event = self.model.stop_motion(reason="mode_change")
             mode_event = self.model.set_mode(mode)
+            self._oracle_set_user_mode(mode)
         self._publish_event(stop_event)
         self._publish_event(mode_event)
         self._publish_mode_and_velocity()
@@ -318,6 +385,7 @@ class GuiTeleopNode:
 
         with self.lock:
             self.model.set_mode(TeleopCommandModel.MODE_GRIPPER)
+            self._oracle_set_user_mode(TeleopCommandModel.MODE_GRIPPER)
             event_json = self.model.record_gripper_action(action, target)
         self._publish_event(event_json)
         self._publish_mode_and_velocity()
@@ -330,7 +398,16 @@ class GuiTeleopNode:
         self.root = tk.Tk()
         self.root.title("PRIME GUI Teleop")
 
-        mode_frame = tk.LabelFrame(self.root, text="Mode Selector", padx=8, pady=6)
+        main_frame = tk.Frame(self.root)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        left_panel = tk.Frame(main_frame)
+        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        right_panel = tk.Frame(main_frame)
+        right_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=8, pady=6)
+
+        mode_frame = tk.LabelFrame(left_panel, text="Mode Selector", padx=8, pady=6)
         mode_frame.pack(fill=tk.X, padx=10, pady=6)
 
         self.mode_var = tk.StringVar(value=TeleopCommandModel.MODE_TRANSLATION)
@@ -359,12 +436,12 @@ class GuiTeleopNode:
             command=self._on_mode_radio,
         ).pack(side=tk.LEFT, padx=4)
 
-        status_frame = tk.Frame(self.root)
+        status_frame = tk.Frame(left_panel)
         status_frame.pack(fill=tk.X, padx=10, pady=4)
         tk.Label(status_frame, textvariable=self.mode_text_var, anchor="w").pack(fill=tk.X)
         tk.Label(status_frame, textvariable=self.active_text_var, anchor="w").pack(fill=tk.X)
 
-        buttons_frame = tk.LabelFrame(self.root, text="Commands", padx=8, pady=8)
+        buttons_frame = tk.LabelFrame(left_panel, text="Commands", padx=8, pady=8)
         buttons_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=6)
 
         self.translation_frame = tk.Frame(buttons_frame)
@@ -393,9 +470,44 @@ class GuiTeleopNode:
             side=tk.LEFT, padx=4, pady=4
         )
 
-        stop_frame = tk.Frame(self.root)
+        stop_frame = tk.Frame(left_panel)
         stop_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
         tk.Button(stop_frame, text="STOP", width=14, command=self._on_stop_button).pack(side=tk.LEFT)
+
+        # Oracle side panel (always show when requested, even if disabled)
+        if self.oracle_enabled_requested:
+            self.oracle_panel = tk.LabelFrame(right_panel, text="Oracle Assist", padx=8, pady=8)
+            self.oracle_panel.pack(fill=tk.Y, expand=True)
+            if not self.oracle_available:
+                status = "Oracle unavailable (import failed). Check logs."
+            elif not PRIME_MSGS_AVAILABLE:
+                status = "Oracle unavailable (PRIME msgs not built)."
+            else:
+                status = "Oracle ready. Press 'Ask assistance'."
+            self.oracle_status_var = tk.StringVar(value=status)
+            tk.Label(
+                self.oracle_panel,
+                textvariable=self.oracle_status_var,
+                anchor="w",
+                justify="left",
+                wraplength=240,
+            ).pack(fill=tk.X, pady=(0, 8))
+
+            btn_row = tk.Frame(self.oracle_panel)
+            btn_row.pack(fill=tk.X, pady=(0, 8))
+            ask_btn = tk.Button(btn_row, text="Ask assistance", width=16, command=self._oracle_ask_assistance)
+            ask_btn.pack(
+                side=tk.LEFT, padx=(0, 6)
+            )
+            reset_btn = tk.Button(btn_row, text="Reset Oracle", width=12, command=self._oracle_reset)
+            reset_btn.pack(side=tk.LEFT)
+
+            if not self.oracle_enabled:
+                ask_btn.configure(state="disabled")
+                reset_btn.configure(state="disabled")
+
+            self.oracle_choices_frame = tk.Frame(self.oracle_panel)
+            self.oracle_choices_frame.pack(fill=tk.X, pady=(6, 0))
 
         self.root.bind_all("<ButtonRelease-1>", self._on_any_button_release, add="+")
         self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
@@ -459,6 +571,271 @@ class GuiTeleopNode:
             self.root.mainloop()
         else:
             rospy.spin()
+
+    # -----------------------
+    # Oracle assist (GUI side panel)
+    # -----------------------
+    def _oracle_set_user_mode(self, mode: str):
+        if not self.oracle_enabled or self.oracle_memory is None:
+            return
+        self.oracle_memory["user_state"] = {"mode": str(mode)}
+
+    def _oracle_state_callback(self, msg: SymbolicState):
+        if not self.oracle_enabled:
+            return
+        objects = []
+        for obj in msg.objects:
+            cell_label = obj.grid_label or self._grid_label_from_index(
+                obj.grid_cell, msg.grid_rows, msg.grid_cols
+            )
+            if not cell_label:
+                continue
+            objects.append(
+                {
+                    "id": obj.object_id,
+                    "label": obj.label or obj.object_id,
+                    "cell": cell_label,
+                    "yaw": yaw_to_bin(obj.yaw_orientation),
+                    "is_held": bool(obj.is_held),
+                }
+            )
+
+        gripper_cell = msg.gripper_grid_label or self._grid_label_from_index(
+            msg.gripper_grid_cell, msg.grid_rows, msg.grid_cols
+        )
+        gripper_yaw = yaw_to_bin(msg.gripper_yaw)
+        z_val = None
+        try:
+            z_val = float(msg.gripper_height)
+        except Exception:
+            try:
+                z_val = float(msg.gripper_position.z)
+            except Exception:
+                z_val = None
+
+        with self.lock:
+            self.oracle_objects = objects
+            if gripper_cell:
+                self._oracle_push_gripper_sample(gripper_cell, gripper_yaw, self._quantize_z(z_val))
+
+    def _oracle_candidates_callback(self, msg: CandidateSet):
+        if not self.oracle_enabled:
+            return
+        with self.lock:
+            if self.oracle_memory is None:
+                self._oracle_init_state()
+            self.oracle_memory["candidates"] = list(msg.candidate_ids or [])
+
+    def _oracle_init_state(self):
+        self.oracle_state = OracleState(intended_obj_id="")
+        self.oracle_memory = {
+            "n_interactions": 0,
+            "past_dialogs": [],
+            "candidates": [],
+            "last_tool_calls": [],
+            "excluded_obj_ids": [],
+            "last_action": {},
+            "last_prompt": {},
+            "user_state": {"mode": self.model.mode},
+        }
+
+    def _oracle_reset(self):
+        if not self.oracle_enabled:
+            return
+        with self.lock:
+            self._oracle_init_state()
+            self.oracle_choices = []
+        self._oracle_clear_choices()
+        if self.oracle_status_var is not None:
+            self.oracle_status_var.set("Oracle reset. Press 'Ask assistance'.")
+
+    def _oracle_clear_choices(self):
+        if self.oracle_choices_frame is None:
+            return
+        for child in list(self.oracle_choices_frame.children.values()):
+            child.destroy()
+
+    def _oracle_render_choices(self, choices):
+        self._oracle_clear_choices()
+        if self.oracle_choices_frame is None:
+            return
+        for choice in choices:
+            self.tk.Button(
+                self.oracle_choices_frame,
+                text=choice,
+                width=22,
+                command=lambda c=choice: self._oracle_on_choice(c),
+            ).pack(fill=self.tk.X, pady=2)
+
+    def _oracle_on_choice(self, choice_str: str):
+        if not self.oracle_enabled:
+            return
+        user_content = choice_to_user_content(choice_str)
+        with self.lock:
+            if self.oracle_memory is None:
+                self._oracle_init_state()
+            self.oracle_memory["past_dialogs"].append({"role": "user", "content": user_content})
+            auto_continue = apply_oracle_user_reply(
+                user_content, self.oracle_objects, self.oracle_memory, self.oracle_state
+            )
+        self._oracle_clear_choices()
+        if self.oracle_publish_response and self.oracle_response_pub and self.oracle_choices:
+            response = PRIMEResponse()
+            response.header.stamp = rospy.Time.now()
+            response.query_id = ""
+            response.selected_labels = [strip_choice_label(choice_str)]
+            try:
+                response.selected_indices = [self.oracle_choices.index(choice_str)]
+            except Exception:
+                response.selected_indices = []
+            response.timed_out = False
+            response.response_time = 0.0
+            self.oracle_response_pub.publish(response)
+
+        if auto_continue:
+            self._oracle_ask_assistance()
+
+    def _oracle_ask_assistance(self):
+        if not self.oracle_enabled:
+            return
+        with self.lock:
+            if self.oracle_memory is None:
+                self._oracle_init_state()
+
+            if not self.oracle_objects or not self.oracle_gripper_hist:
+                if self.oracle_status_var is not None:
+                    self.oracle_status_var.set("Waiting for /prime/symbolic_state...")
+                return
+
+            # Ensure candidates are populated.
+            if not self.oracle_memory.get("candidates"):
+                self.oracle_memory["candidates"] = [o["id"] for o in self.oracle_objects]
+
+            # Update intended object if missing or stale.
+            if not self.oracle_state.intended_obj_id or self.oracle_state.intended_obj_id not in {
+                o["id"] for o in self.oracle_objects
+            }:
+                self.oracle_state.intended_obj_id = self._oracle_pick_intended()
+
+            self.oracle_memory["user_state"] = {"mode": self.model.mode}
+
+            tool_call = oracle_decide_tool(
+                self.oracle_objects,
+                self.oracle_gripper_hist,
+                self.oracle_memory,
+                self.oracle_state,
+                user_state=self.oracle_memory["user_state"],
+            )
+            validate_tool_call(tool_call)
+
+        tool = tool_call["tool"]
+        args = tool_call["args"]
+        with self.lock:
+            self.oracle_memory["last_tool_calls"].append(tool)
+            self.oracle_memory["last_tool_calls"] = self.oracle_memory["last_tool_calls"][-3:]
+
+        if tool == "INTERACT":
+            text = args["text"]
+            choices = list(args["choices"])
+            if self.oracle_status_var is not None:
+                self.oracle_status_var.set(text)
+            with self.lock:
+                self.oracle_memory["past_dialogs"].append({"role": "assistant", "content": text})
+                self.oracle_memory["n_interactions"] = int(self.oracle_memory.get("n_interactions", 0)) + 1
+                self.oracle_memory["last_prompt"] = {"kind": args["kind"], "text": text, "choices": list(choices)}
+                self.oracle_choices = choices
+            if self.oracle_publish_query and self.oracle_query_pub:
+                query = PRIMEQuery()
+                query.header.stamp = rospy.Time.now()
+                query.query_type = {
+                    "QUESTION": PRIMEQuery.TYPE_QUESTION,
+                    "SUGGESTION": PRIMEQuery.TYPE_SUGGESTION,
+                    "CONFIRM": PRIMEQuery.TYPE_CONFIRMATION,
+                }.get(args["kind"], PRIMEQuery.TYPE_QUESTION)
+                query.content = text
+                query.options = choices
+                query.max_selections = 1
+                query.timeout = 0.0
+                query.query_id = uuid.uuid4().hex
+                self.oracle_query_pub.publish(query)
+            self._oracle_render_choices(choices)
+            return
+
+        # Motion tools -> publish ToolCall
+        if tool in {"APPROACH", "ALIGN_YAW"}:
+            obj_id = args["obj"]
+            if self.oracle_status_var is not None:
+                self.oracle_status_var.set(f"Executing: {tool}({obj_id})")
+            if self.oracle_tool_pub:
+                msg = ToolCall()
+                msg.header.stamp = rospy.Time.now()
+                msg.tool_name = tool
+                msg.target_object_id = obj_id
+                msg.reasoning = "oracle"
+                msg.call_id = uuid.uuid4().hex
+                self.oracle_tool_pub.publish(msg)
+            with self.lock:
+                self.oracle_memory["last_action"] = {"tool": tool, "obj": obj_id}
+            return
+
+    def _oracle_pick_intended(self) -> str:
+        if not self.oracle_objects:
+            return ""
+        candidates = self.oracle_memory.get("candidates") or [o["id"] for o in self.oracle_objects]
+        objs_by_id = {o["id"]: o for o in self.oracle_objects}
+        gcell = self.oracle_gripper_hist[-1]["cell"]
+        best_id = None
+        best_dist = None
+        for cid in candidates:
+            obj = objs_by_id.get(cid)
+            if not obj:
+                continue
+            dist = manhattan(gcell, obj["cell"])
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best_id = cid
+        return best_id or self.oracle_objects[0]["id"]
+
+    def _oracle_push_gripper_sample(self, cell: str, yaw: str, z: str):
+        sample = {"cell": cell, "yaw": yaw, "z": z}
+        if not self.oracle_gripper_hist or self.oracle_gripper_hist[-1] != sample:
+            self.oracle_gripper_hist.append(sample)
+        if len(self.oracle_gripper_hist) > self.oracle_history_len:
+            self.oracle_gripper_hist = self.oracle_gripper_hist[-self.oracle_history_len :]
+
+    def _grid_label_from_index(self, cell_index, rows, cols) -> str:
+        try:
+            cell_index = int(cell_index)
+            rows = int(rows) if rows else 3
+            cols = int(cols) if cols else 3
+        except Exception:
+            return ""
+        if rows <= 0 or cols <= 0:
+            return ""
+        row = cell_index // cols
+        col = cell_index % cols
+        if not (0 <= row < rows and 0 <= col < cols):
+            return ""
+        row_letter = chr(ord("A") + row)
+        return f"{row_letter}{col+1}"
+
+    def _quantize_z(self, z_val):
+        if z_val is None:
+            return "MID"
+        try:
+            z_val = float(z_val)
+        except Exception:
+            return "MID"
+        z_min = float(self.oracle_z_min)
+        z_max = float(self.oracle_z_max)
+        if z_max <= z_min:
+            return "MID"
+        span = z_max - z_min
+        if z_val <= z_min + span * 0.33:
+            return "LOW"
+        if z_val <= z_min + span * 0.66:
+            return "MID"
+        return "HIGH"
 
 
 def main():
