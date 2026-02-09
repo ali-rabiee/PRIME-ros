@@ -19,6 +19,10 @@ geometry_msgs/Point[] gripper_history
 # Current control mode
 ControlMode control_mode
 
+# GUI teleoperation event logging (JSON payloads from /prime/gui_teleop_event)
+string last_gui_teleop_event_json
+string[] gui_teleop_event_history_json
+
 # Grid dimensions (default 3x3)
 uint8 grid_rows
 uint8 grid_cols

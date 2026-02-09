@@ -10,7 +10,7 @@ This is the main orchestration node that coordinates:
 
 The PRIME loop:
 1. Monitor symbolic state and control mode
-2. When user is actively controlling (joystick movement detected):
+2. When user is actively controlling (GUI motion command active):
    - Update candidate set based on proximity and motion
    - Call LLM for decision
 3. Execute LLM's tool call
@@ -136,7 +136,7 @@ class PRIMENode:
         with self.lock:
             self.current_symbolic_state = msg
             
-            # Check for user activity (joystick movement)
+            # Check for user activity (GUI motion command active)
             if msg.control_mode.joystick_active:
                 self.last_activity_time = rospy.Time.now()
     

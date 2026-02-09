@@ -16,7 +16,6 @@ find_package(catkin REQUIRED COMPONENTS
 # Generate messages
 add_message_files(
   FILES
-  JoystickState.msg
   ControlMode.msg
   ObjectState.msg
   SymbolicState.msg
@@ -73,7 +72,7 @@ catkin_install_python(PROGRAMS
   scripts/llm_executive.py
   scripts/tool_executor.py
   scripts/user_interface.py
-  scripts/joystick_monitor.py
+  scripts/gui_teleop.py
   scripts/go_home.py
   scripts/print_home_state.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
@@ -88,3 +87,7 @@ install(DIRECTORY launch/
 install(DIRECTORY config/
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/config
 )
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_nosetests(test/test_teleop_command_model.py)
+endif()

@@ -8,6 +8,7 @@
   <arg name="auto_home" default="true"/>
   <arg name="home_target" default="Home"/>
   <arg name="home_delay" default="3.0"/>
+  <arg name="enable_gui_teleop" default="true"/>
   
   <!-- Load parameters -->
   <rosparam file="$(find prime_ros)/config/prime_params.yaml" command="load"/>
@@ -17,11 +18,15 @@
   <param name="robot/type" value="$(arg robot_type)"/>
   <param name="llm/endpoint" value="$(arg llm_endpoint)"/>
   
-  <!-- Joystick Monitor Node -->
-  <!-- This node reads joystick state from Kinova API and publishes it -->
-  <node pkg="prime_ros" type="joystick_monitor.py" name="joystick_monitor" output="screen">
+  <!-- GUI Teleoperation Node -->
+  <!-- Replaces joystick pipeline and publishes /prime/control_mode -->
+  <node if="$(arg enable_gui_teleop)" pkg="prime_ros" type="gui_teleop.py" name="gui_teleop" output="screen">
     <param name="robot_type" value="$(arg robot_type)"/>
-    <param name="publish_rate" value="20.0"/>
+    <!-- Ensure GUI teleop starts only after auto-home completes -->
+    <param name="wait_for_home" value="$(arg auto_home)"/>
+    <param name="home_done_param" value="/prime/homing_done"/>
+    <!-- 0 = wait forever (recommended); set >0 to fail open -->
+    <param name="home_wait_timeout" value="0.0"/>
   </node>
   
   <!-- State Builder Node -->

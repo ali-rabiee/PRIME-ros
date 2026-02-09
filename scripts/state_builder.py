@@ -69,6 +69,7 @@ class StateBuilder:
         # State builder parameters
         self.update_rate = float(rospy.get_param("state_builder/update_rate", 10.0))
         self.history_length = int(rospy.get_param("state_builder/gripper_history_length", 10))
+        self.gui_event_history_length = int(rospy.get_param("state_builder/gui_event_history_length", 20))
         self.position_threshold = float(rospy.get_param("state_builder/position_threshold", 0.02))
 
         # Detection filtering + tracking (stable IDs)
@@ -99,6 +100,8 @@ class StateBuilder:
         self.latest_yolo_image = None
         self.gripper_pose: Optional[PoseStamped] = None
         self.gripper_history = deque(maxlen=self.history_length)
+        self.last_gui_teleop_event_json = ""
+        self.gui_teleop_event_history = deque(maxlen=self.gui_event_history_length)
         self.control_mode: Optional[ControlMode] = None
 
         # Behavior toggles
@@ -115,6 +118,7 @@ class StateBuilder:
         )
         if MSGS_AVAILABLE:
             self.mode_sub = rospy.Subscriber("/prime/control_mode", ControlMode, self.control_mode_callback, queue_size=1)
+        self.gui_event_sub = rospy.Subscriber("/prime/gui_teleop_event", String, self.gui_event_callback, queue_size=50)
 
         self.yolo_img_sub = rospy.Subscriber("/yolo/image_with_bboxes", Image, self.yolo_image_callback, queue_size=1)
         self.yolo_dets_sub = rospy.Subscriber("/yolo/detections_json", String, self.yolo_detections_callback, queue_size=1)
@@ -180,6 +184,14 @@ class StateBuilder:
             self.latest_detections = payload.get("detections", []) or []
             self.latest_workspace_bbox = payload.get("workspace_bbox_xyxy", None)
             self.latest_grid_bbox = payload.get("grid_bbox_xyxy", self.latest_workspace_bbox)
+
+    def gui_event_callback(self, msg: String):
+        event_json = str(msg.data or "")
+        if not event_json:
+            return
+        with self.lock:
+            self.last_gui_teleop_event_json = event_json
+            self.gui_teleop_event_history.append(event_json)
 
     # -----------------------
     # Grid + metric mapping
@@ -424,6 +436,8 @@ class StateBuilder:
         else:
             state.control_mode = ControlMode()
             state.control_mode.mode = ControlMode.MODE_UNKNOWN
+        state.last_gui_teleop_event_json = str(self.last_gui_teleop_event_json)
+        state.gui_teleop_event_history_json = list(self.gui_teleop_event_history)
 
         # Grid config
         state.grid_rows = self.grid_rows
@@ -514,4 +528,3 @@ class StateBuilder:
 
 if __name__ == "__main__":
     StateBuilder().run()
-

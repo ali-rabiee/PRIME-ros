@@ -41,6 +41,7 @@ safety_bounds:
 # State builder parameters
 state_builder:
   gripper_history_length: 10  # Number of timesteps to keep
+  gui_event_history_length: 20
   update_rate: 10.0  # Hz
   position_threshold: 0.02  # meters, minimum movement to update history
   # Stabilization for YOLO detections -> PRIME objects
@@ -76,14 +77,16 @@ llm:
 # User interface configuration
 ui:
   query_timeout: 30.0  # seconds
-  # Button mapping for Kinova joystick (adjust based on your setup)
-  button_yes: 0
-  button_no: 1
-  button_option_1: 2
-  button_option_2: 3
-  button_option_3: 4
-  button_option_4: 5
-  button_option_5: 6
+
+# GUI teleoperation configuration
+teleop_gui:
+  # Kinova cartesian velocity control is designed around a ~100Hz command loop.
+  # Lower rates can lead to very weak/choppy motion.
+  publish_rate: 100.0
+  # Translation velocity in m/s. Increase if translation feels too slow.
+  linear_speed: 0.25
+  angular_speed: 5.0
+  gripper_activity_latch: 0.2
 
 # Tool execution parameters
 tools:
