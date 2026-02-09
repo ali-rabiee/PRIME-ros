@@ -95,7 +95,8 @@ tools:
     approach_speed: 0.1  # m/s
     # Pixel-servo refinement (after reaching grid-cell center)
     pixel_servo:
-      enabled: true
+      # Opt-in: enable only when you explicitly want vision servoing
+      enabled: false
       max_steps: 8
       pixel_tolerance: 15          # stop if |pixel error| <= this
       gain: 0.6                    # scales commanded XY step

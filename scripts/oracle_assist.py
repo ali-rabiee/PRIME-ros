@@ -276,11 +276,13 @@ def oracle_decide_tool(
             state.awaiting_mode_select = False
 
         if state.pending_mode == "APPROACH":
-            if current_cell != target["cell"]:
-                tool = _tool("APPROACH", {"obj": target["id"]})
-                clear_pending()
-                return tool
+            # IMPORTANT (PRIME integration):
+            # In the real robot, being in the same discretized grid cell does NOT mean
+            # the end-effector is already in a good pre-grasp approach pose.
+            # So when the user confirms APPROACH, always execute exactly one APPROACH tool call.
+            tool = _tool("APPROACH", {"obj": target["id"]})
             clear_pending()
+            return tool
         elif state.pending_mode == "ALIGN_YAW":
             if current_yaw != target["yaw"]:
                 tool = _tool("ALIGN_YAW", {"obj": target["id"]})
@@ -288,10 +290,10 @@ def oracle_decide_tool(
                 return tool
             clear_pending()
         else:
-            if current_cell != target["cell"]:
-                tool = _tool("APPROACH", {"obj": target["id"]})
-                clear_pending()
-                return tool
+            # Same reasoning as above: prefer a single APPROACH even if cells match.
+            tool = _tool("APPROACH", {"obj": target["id"]})
+            clear_pending()
+            return tool
             if current_yaw != target["yaw"]:
                 tool = _tool("ALIGN_YAW", {"obj": target["id"]})
                 clear_pending()

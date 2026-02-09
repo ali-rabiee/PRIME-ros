@@ -26,7 +26,7 @@ if _SCRIPT_DIR not in sys.path:
 from prime_ros.msg import ControlMode
 
 try:
-    from prime_ros.msg import SymbolicState, CandidateSet, ToolCall, PRIMEQuery, PRIMEResponse
+    from prime_ros.msg import SymbolicState, CandidateSet, ToolCall, ToolResult, PRIMEQuery, PRIMEResponse
     PRIME_MSGS_AVAILABLE = True
 except Exception:
     PRIME_MSGS_AVAILABLE = False
@@ -271,6 +271,11 @@ class GuiTeleopNode:
         if not self.finger_client.wait_for_server(rospy.Duration(2.0)):
             rospy.logwarn("Gripper action server unavailable on %s", self.finger_action_name)
 
+        # Teleop pause gate: prevents GUI cartesian velocity from fighting MoveIt execution.
+        self.teleop_paused = False
+        self.teleop_pause_reason = ""
+        self.teleop_pause_call_id = None
+
         # Oracle state + ROS plumbing
         self.oracle_state = None
         self.oracle_memory = None
@@ -284,6 +289,11 @@ class GuiTeleopNode:
         self.oracle_tool_pub = None
         self.oracle_query_pub = None
         self.oracle_response_pub = None
+        if PRIME_MSGS_AVAILABLE:
+            # Listen for tool calls/results from *any* source so GUI teleop doesn't interfere.
+            rospy.Subscriber("/prime/tool_call", ToolCall, self._teleop_tool_call_callback, queue_size=10)
+            rospy.Subscriber("/prime/tool_result", ToolResult, self._teleop_tool_result_callback, queue_size=10)
+
         if self.oracle_enabled and PRIME_MSGS_AVAILABLE:
             self.oracle_tool_pub = rospy.Publisher("/prime/tool_call", ToolCall, queue_size=10)
             if self.oracle_publish_query:
@@ -332,17 +342,28 @@ class GuiTeleopNode:
             time.sleep(0.1)
 
     def publish_cycle(self, _evt):
+        if rospy.is_shutdown():
+            return
         with self.lock:
             cmd = self.model.build_velocity_command()
             mode_msg = self.model.build_control_mode()
-        self.velocity_pub.publish(cmd)
+            paused = bool(self.teleop_paused)
+        # Always publish control mode for observability.
         self.mode_pub.publish(mode_msg)
+        # Only publish cartesian velocity when not paused (prevents fighting MoveIt).
+        if not paused:
+            try:
+                self.velocity_pub.publish(cmd)
+            except Exception:
+                # During shutdown, publishers can close before timers stop.
+                pass
 
     def _publish_mode_and_velocity(self):
         with self.lock:
             cmd = self.model.build_velocity_command()
             mode_msg = self.model.build_control_mode()
-        self.velocity_pub.publish(cmd)
+        if not self.teleop_paused:
+            self.velocity_pub.publish(cmd)
         self.mode_pub.publish(mode_msg)
 
     def _publish_event(self, event_json):
@@ -671,6 +692,8 @@ class GuiTeleopNode:
         if not self.oracle_enabled:
             return
         user_content = choice_to_user_content(choice_str)
+        if self.oracle_status_var is not None:
+            self.oracle_status_var.set(f"You selected: {strip_choice_label(choice_str)}")
         with self.lock:
             if self.oracle_memory is None:
                 self._oracle_init_state()
@@ -730,6 +753,7 @@ class GuiTeleopNode:
 
         tool = tool_call["tool"]
         args = tool_call["args"]
+        rospy.loginfo("Oracle decided: %s %s", tool, str(args))
         with self.lock:
             self.oracle_memory["last_tool_calls"].append(tool)
             self.oracle_memory["last_tool_calls"] = self.oracle_memory["last_tool_calls"][-3:]
@@ -765,18 +789,82 @@ class GuiTeleopNode:
         if tool in {"APPROACH", "ALIGN_YAW"}:
             obj_id = args["obj"]
             if self.oracle_status_var is not None:
-                self.oracle_status_var.set(f"Executing: {tool}({obj_id})")
-            if self.oracle_tool_pub:
+                self.oracle_status_var.set(f"Publishing tool call: {tool}({obj_id})")
+            if not self.oracle_tool_pub:
+                rospy.logerr("Oracle tool publisher not available; cannot publish /prime/tool_call")
+                if self.oracle_status_var is not None:
+                    self.oracle_status_var.set("ERROR: cannot publish /prime/tool_call (publisher missing)")
+                return
+            try:
                 msg = ToolCall()
                 msg.header.stamp = rospy.Time.now()
                 msg.tool_name = tool
                 msg.target_object_id = obj_id
                 msg.reasoning = "oracle"
                 msg.call_id = uuid.uuid4().hex
+                # Pause GUI teleop immediately so MoveIt execution isn't interfered with.
+                self._pause_teleop_for_tool(msg)
                 self.oracle_tool_pub.publish(msg)
+                rospy.loginfo("Published /prime/tool_call: %s target=%s call_id=%s", tool, obj_id, msg.call_id)
+                if self.oracle_status_var is not None:
+                    self.oracle_status_var.set(f"Published: {tool}({obj_id})")
+            except Exception as e:
+                rospy.logerr("Failed publishing /prime/tool_call: %s", str(e))
+                if self.oracle_status_var is not None:
+                    self.oracle_status_var.set(f"ERROR publishing tool call: {e}")
+                return
             with self.lock:
                 self.oracle_memory["last_action"] = {"tool": tool, "obj": obj_id}
             return
+
+    # -----------------------
+    # Teleop pause/resume around tool execution
+    # -----------------------
+    def _pause_teleop_for_tool(self, call_msg):
+        """
+        Pause GUI teleop velocity publishing when a motion tool starts.
+        We also send a single STOP (zero velocity) to ensure no residual teleop motion.
+        """
+        tool = getattr(call_msg, "tool_name", "")
+        if tool in ("INTERACT", "", None):
+            return
+        with self.lock:
+            self.teleop_paused = True
+            self.teleop_pause_reason = str(tool)
+            self.teleop_pause_call_id = getattr(call_msg, "call_id", None)
+            # Stop any held GUI motion.
+            stop_event = self.model.stop_motion(reason="paused_for_tool", force_event=True)
+        self._publish_event(stop_event)
+        # Publish a single zero velocity (then stop publishing while paused).
+        try:
+            self.velocity_pub.publish(PoseVelocity())
+        except Exception:
+            pass
+        rospy.loginfo("GUI teleop paused for tool=%s call_id=%s", str(tool), str(self.teleop_pause_call_id))
+
+    def _resume_teleop(self, reason=""):
+        with self.lock:
+            self.teleop_paused = False
+            self.teleop_pause_reason = ""
+            self.teleop_pause_call_id = None
+        rospy.loginfo("GUI teleop resumed (%s)", reason or "tool complete")
+
+    def _teleop_tool_call_callback(self, msg):
+        # Pause for any external tool call too (LLM executive, etc.).
+        if getattr(msg, "tool_name", "") in ("APPROACH", "ALIGN_YAW", "GRASP", "RELEASE"):
+            self._pause_teleop_for_tool(msg)
+
+    def _teleop_tool_result_callback(self, msg):
+        # Resume when the matching tool finishes.
+        call_id = getattr(msg, "call_id", None)
+        with self.lock:
+            paused = bool(self.teleop_paused)
+            paused_id = self.teleop_pause_call_id
+        if not paused:
+            return
+        # If we don't have a call id (or caller didn't set one), be permissive and resume.
+        if not paused_id or (call_id and call_id == paused_id):
+            self._resume_teleop(reason=f"tool_result {getattr(msg,'tool_name','')}")
 
     def _oracle_pick_intended(self) -> str:
         if not self.oracle_objects:

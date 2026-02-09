@@ -78,7 +78,8 @@ class ToolExecutor:
         self.align_tolerance = rospy.get_param('tools/align/tolerance', 0.1)
 
         # Pixel-servo refinement params (after reaching grid-cell center)
-        self.servo_enabled = bool(rospy.get_param("tools/approach/pixel_servo/enabled", True))
+        # Default OFF: opt-in via `tools/approach/pixel_servo/enabled:=true`
+        self.servo_enabled = bool(rospy.get_param("tools/approach/pixel_servo/enabled", False))
         self.servo_max_steps = int(rospy.get_param("tools/approach/pixel_servo/max_steps", 5))
         self.servo_pixel_tol = float(rospy.get_param("tools/approach/pixel_servo/pixel_tolerance", 15.0))
         self.servo_gain = float(rospy.get_param("tools/approach/pixel_servo/gain", 0.6))
