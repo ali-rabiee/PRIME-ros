@@ -210,6 +210,15 @@ class StateBuilder:
         if ws_bbox_xyxy is None:
             return None, None, None, None
         x1, y1, x2, y2 = ws_bbox_xyxy
+        # If the pixel is outside the workspace/grid bbox, treat it as "not on the workspace".
+        # This prevents wide-FOV cameras from mapping outside detections into edge grid cells.
+        try:
+            fx = float(cx)
+            fy = float(cy)
+        except Exception:
+            return None, None, None, None
+        if fx < float(x1) or fx > float(x2) or fy < float(y1) or fy > float(y2):
+            return None, None, None, None
         w = max(1.0, float(x2 - x1))
         h = max(1.0, float(y2 - y1))
         col = int((float(cx) - x1) / (w / 3.0))
