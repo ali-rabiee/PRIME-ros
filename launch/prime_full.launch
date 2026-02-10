@@ -54,6 +54,12 @@
     <param name="image_topic" value="$(arg yolo_image_topic)"/>
     <param if="$(arg set_yolo_grid_crop)" name="grid_crop_top_ratio" value="$(arg grid_crop_top_ratio)"/>
     <param if="$(arg set_yolo_grid_crop)" name="grid_crop_bottom_ratio" value="$(arg grid_crop_bottom_ratio)"/>
+    <!-- Compute yaw from instance masks and attach into /yolo/detections_json -->
+    <param name="compute_mask_yaw" value="true"/>
+    <param name="mask_yaw_min_pixels" value="80"/>
+    <param name="mask_yaw_min_ratio" value="1.25"/>
+    <param name="draw_mask_yaw_overlay" value="true"/>
+    <param name="mask_yaw_overlay_len_px" value="60"/>
   </node>
 
   <!-- 4) Connect TF trees so MoveIt ('world' frame) can see everything.

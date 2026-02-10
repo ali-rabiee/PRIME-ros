@@ -66,6 +66,14 @@ class StateBuilder:
             axis_signs.append(1.0)
         self.metric_axis_signs = [float(axis_signs[0]), float(axis_signs[1]), float(axis_signs[2])]
 
+        # Yaw handling (purely image-based yaw coming from YOLO masks)
+        # - YOLO publishes yaw in image coordinates (x right, y down) as det["mask_yaw_rad"].
+        # - We map that yaw into the same metric/grid frame as objects (using axis_signs flips),
+        #   then add an optional constant offset for camera-to-robot alignment.
+        self.use_mask_yaw = bool(rospy.get_param("state_builder/use_mask_yaw", True))
+        self.mask_yaw_field = str(rospy.get_param("state_builder/mask_yaw_field", "mask_yaw_rad")).strip()
+        self.yaw_offset_rad = float(rospy.get_param("workspace/yaw_offset_rad", 0.0))
+
         # State builder parameters
         self.update_rate = float(rospy.get_param("state_builder/update_rate", 10.0))
         self.history_length = int(rospy.get_param("state_builder/gripper_history_length", 10))
@@ -287,6 +295,17 @@ class StateBuilder:
             if px is None or py is None:
                 continue
 
+            yaw_img = None
+            if self.use_mask_yaw and self.mask_yaw_field:
+                try:
+                    yv = det.get(self.mask_yaw_field, None)
+                    if yv is not None:
+                        yaw_img = float(yv)
+                        if not np.isfinite(yaw_img):
+                            yaw_img = None
+                except Exception:
+                    yaw_img = None
+
             grid_label, cell_index, row, col = self.pixel_to_grid_label(px, py, self.latest_grid_bbox)
             if grid_label is None:
                 continue
@@ -300,6 +319,7 @@ class StateBuilder:
                     "grid_cell": int(cell_index),
                     "grid_row": int(row),
                     "grid_col": int(col),
+                    "yaw_img": yaw_img,
                 }
             )
 
@@ -331,6 +351,13 @@ class StateBuilder:
                 tr["grid_cell"] = int(m["grid_cell"])
                 tr["grid_row"] = int(m["grid_row"])
                 tr["grid_col"] = int(m["grid_col"])
+                # Circular smoothing for yaw (store as unit vector components)
+                if m.get("yaw_img") is not None:
+                    y = float(m["yaw_img"])
+                    c = float(np.cos(y))
+                    s = float(np.sin(y))
+                    tr["yaw_c"] = float(alpha * c + (1.0 - alpha) * float(tr.get("yaw_c", c)))
+                    tr["yaw_s"] = float(alpha * s + (1.0 - alpha) * float(tr.get("yaw_s", s)))
                 tr["last_seen"] = now
                 tr["hits"] = int(tr.get("hits", 1)) + 1
                 if int(tr.get("hits", 0)) >= self.track_min_confirmations:
@@ -339,6 +366,12 @@ class StateBuilder:
             else:
                 oid = f"obj_{self.next_track_id}"
                 self.next_track_id += 1
+                yaw_c = None
+                yaw_s = None
+                if m.get("yaw_img") is not None:
+                    y = float(m["yaw_img"])
+                    yaw_c = float(np.cos(y))
+                    yaw_s = float(np.sin(y))
                 self.tracks[oid] = {
                     "px": int(m["px"]),
                     "py": int(m["py"]),
@@ -347,6 +380,8 @@ class StateBuilder:
                     "grid_cell": int(m["grid_cell"]),
                     "grid_row": int(m["grid_row"]),
                     "grid_col": int(m["grid_col"]),
+                    "yaw_c": yaw_c if yaw_c is not None else 1.0,
+                    "yaw_s": yaw_s if yaw_s is not None else 0.0,
                     "last_seen": now,
                     "first_seen": now,
                     "hits": 1,
@@ -371,7 +406,18 @@ class StateBuilder:
             x, y = self.grid_cell_center_xy(obj.grid_row, obj.grid_col)
             obj.position = Point(x=x, y=y, z=float(self.metric_object_z))
 
-            obj.yaw_orientation = 0.0
+            # Convert image-yaw to metric-yaw using axis_sign flips and a constant offset.
+            # Image convention: x right, y down.
+            # Metric convention here: x/y follow the workspace rectangle mapping.
+            try:
+                yaw_img = float(np.arctan2(float(tr.get("yaw_s", 0.0)), float(tr.get("yaw_c", 1.0))))
+                vx = float(np.cos(yaw_img))
+                vy = float(np.sin(yaw_img))
+                vx_m = float(self.metric_axis_signs[0]) * vx
+                vy_m = float(self.metric_axis_signs[1]) * vy
+                obj.yaw_orientation = float(np.arctan2(vy_m, vx_m) + float(self.yaw_offset_rad))
+            except Exception:
+                obj.yaw_orientation = 0.0
             obj.is_held = False
             obj.confidence = float(tr.get("conf", 0.0))
             obj.bbox_center_x = int(tr.get("px", 0))
