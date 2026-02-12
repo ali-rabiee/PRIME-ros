@@ -1071,12 +1071,15 @@ class GuiTeleopNode:
         # Motion tools -> publish ToolCall
         if tool in {"APPROACH", "ALIGN_YAW"}:
             obj_id = args["obj"]
+            # User-friendly action name for status display
+            _display_tool = "Align gripper" if tool == "ALIGN_YAW" else "Approach"
+            _display_obj = obj_id.replace("_", " ")
             if self.oracle_status_var is not None:
-                self.oracle_status_var.set(f"Publishing tool call: {tool}({obj_id})")
+                self.oracle_status_var.set(f"Executing: {_display_tool} ({_display_obj})...")
             if not self.oracle_tool_pub:
                 rospy.logerr("Oracle tool publisher not available; cannot publish /prime/tool_call")
                 if self.oracle_status_var is not None:
-                    self.oracle_status_var.set("ERROR: cannot publish /prime/tool_call (publisher missing)")
+                    self.oracle_status_var.set("ERROR: cannot publish tool call (publisher missing)")
                 return
             try:
                 msg = ToolCall()
@@ -1090,11 +1093,11 @@ class GuiTeleopNode:
                 self.oracle_tool_pub.publish(msg)
                 rospy.loginfo("Published /prime/tool_call: %s target=%s call_id=%s", tool, obj_id, msg.call_id)
                 if self.oracle_status_var is not None:
-                    self.oracle_status_var.set(f"Published: {tool}({obj_id})")
+                    self.oracle_status_var.set(f"Running: {_display_tool} ({_display_obj})")
             except Exception as e:
                 rospy.logerr("Failed publishing /prime/tool_call: %s", str(e))
                 if self.oracle_status_var is not None:
-                    self.oracle_status_var.set(f"ERROR publishing tool call: {e}")
+                    self.oracle_status_var.set(f"ERROR: {e}")
                 return
             with self.lock:
                 self.oracle_memory["last_action"] = {"tool": tool, "obj": obj_id}
