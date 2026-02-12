@@ -22,6 +22,9 @@ workspace:
   # Flip grid-to-metric mapping direction without changing the rectangle itself.
   # [-1, 1, 1] = flip left/right (A1<->A3), [1,-1,1] = flip top/bottom (A*<->C*), [-1,-1,1] = both
   axis_signs: [-1.0, 1.0, 1.0]
+  # Optional constant yaw offset (radians) applied when converting mask yaw (image space)
+  # into robot/world yaw for ALIGN_YAW. Tune this if yaw appears consistently rotated.
+  yaw_offset_rad: 0.0
 
 # Safety boundary — hard motion limits (recommended ON for real robot)
 # MoveIt tool calls are clamped to these bounds. Can be wider than workspace.
@@ -41,8 +44,18 @@ safety_bounds:
 # State builder parameters
 state_builder:
   gripper_history_length: 10  # Number of timesteps to keep
+  gui_event_history_length: 20
   update_rate: 10.0  # Hz
   position_threshold: 0.02  # meters, minimum movement to update history
+  # Detection class filtering for modern YOLO label sets:
+  # - "*" accepts all detected classes as object candidates
+  # - ignored_detection_classes are excluded from PRIME suggestions
+  object_classes: ["*"]
+  ignored_detection_classes: ["workspace", "jaco"]
+  # If true, use YOLO mask-based yaw (det["mask_yaw_rad"]) for ObjectState.yaw_orientation.
+  # This is purely image-based and only reliable for elongated silhouettes.
+  use_mask_yaw: true
+  mask_yaw_field: "mask_yaw_rad"
   # Stabilization for YOLO detections -> PRIME objects
   min_object_confidence: 0.5
   # If publish_stale_tracks=false, tracks not seen for track_max_age seconds won't be published.
@@ -76,14 +89,16 @@ llm:
 # User interface configuration
 ui:
   query_timeout: 30.0  # seconds
-  # Button mapping for Kinova joystick (adjust based on your setup)
-  button_yes: 0
-  button_no: 1
-  button_option_1: 2
-  button_option_2: 3
-  button_option_3: 4
-  button_option_4: 5
-  button_option_5: 6
+
+# GUI teleoperation configuration
+teleop_gui:
+  # Kinova cartesian velocity control is designed around a ~100Hz command loop.
+  # Lower rates can lead to very weak/choppy motion.
+  publish_rate: 100.0
+  # Translation velocity in m/s. Increase if translation feels too slow.
+  linear_speed: 0.25
+  angular_speed: 5.0
+  gripper_activity_latch: 0.2
 
 # Tool execution parameters
 tools:
@@ -92,7 +107,8 @@ tools:
     approach_speed: 0.1  # m/s
     # Pixel-servo refinement (after reaching grid-cell center)
     pixel_servo:
-      enabled: true
+      # Opt-in: enable only when you explicitly want vision servoing
+      enabled: false
       max_steps: 8
       pixel_tolerance: 15          # stop if |pixel error| <= this
       gain: 0.6                    # scales commanded XY step

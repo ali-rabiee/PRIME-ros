@@ -9,6 +9,20 @@
   <arg name="color_height" default="720"/>
   <arg name="color_fps" default="30"/>
 
+  <!-- YOLO model selection (switch whole pipeline easily)
+       Examples:
+         roslaunch prime_ros prime_full.launch yolo_model:=yolo26
+         roslaunch prime_ros prime_full.launch yolo_model:=yolov8
+
+       Optional override:
+         yolo_model_path:=/abs/path/to/weights.pt
+       Optional (if your RGB topic differs):
+         yolo_image_topic:=/camera/color/image_raw
+  -->
+  <arg name="yolo_model" default="yolo26"/>
+  <arg name="yolo_model_path" default=""/>
+  <arg name="yolo_image_topic" default="/camera/color/image_raw"/>
+
   <!-- YOLO grid crop (inside workspace bbox)
        By default we do NOT set these params here, so `yolo_node.py`'s built-in
        defaults (rospy.get_param("~grid_crop_*", ...)) take effect.
@@ -35,8 +49,17 @@
 
   <!-- 3) YOLO detection -->
   <node pkg="yolo-ros" type="yolo_node.py" name="yolo_node" output="screen">
+    <param name="model_variant" value="$(arg yolo_model)"/>
+    <param if="$(eval arg('yolo_model_path') != '')" name="model_path" value="$(arg yolo_model_path)"/>
+    <param name="image_topic" value="$(arg yolo_image_topic)"/>
     <param if="$(arg set_yolo_grid_crop)" name="grid_crop_top_ratio" value="$(arg grid_crop_top_ratio)"/>
     <param if="$(arg set_yolo_grid_crop)" name="grid_crop_bottom_ratio" value="$(arg grid_crop_bottom_ratio)"/>
+    <!-- Compute yaw from instance masks and attach into /yolo/detections_json -->
+    <param name="compute_mask_yaw" value="true"/>
+    <param name="mask_yaw_min_pixels" value="80"/>
+    <param name="mask_yaw_min_ratio" value="1.25"/>
+    <param name="draw_mask_yaw_overlay" value="true"/>
+    <param name="mask_yaw_overlay_len_px" value="60"/>
   </node>
 
   <!-- 4) Connect TF trees so MoveIt ('world' frame) can see everything.

@@ -17,5 +17,5 @@ bool translation_active
 bool rotation_active
 bool fingers_active
 
-# Is joystick currently being used
+# GUI active-command indicator (repurposed legacy field name)
 bool joystick_active

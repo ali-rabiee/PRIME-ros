@@ -26,8 +26,8 @@ PRIME enables fluent human–robot collaboration using only symbolic observation
 │  └──────────────┘   └──────────────┘   └──────┬───────┘     │
 │                                               │             │
 │  ┌──────────────┐   ┌──────────────┐          │             │
-│  │   Joystick   │──▶│   Memory     │◀─────────┤             │
-│  │   Monitor    │   │   Module     │          │             │
+│  │ GUI Teleop   │──▶│   Memory     │◀─────────┤             │
+│  │ (mode+cmd)   │   │   Module     │          │             │
 │  └──────────────┘   └──────────────┘          ▼             │
 │                                        ┌──────────────┐     │
 │  ┌──────────────┐                      │Tool Executor │     │
@@ -94,15 +94,15 @@ Edit `config/prime_params.yaml` for:
 - Workspace bounds (3x3 grid discretization)
 - LLM endpoint and model settings
 - Tool execution parameters
-- User interface button mappings
+- GUI teleop speeds/publish rate
 
 ## ROS Topics
 
 ### Published
 - `/prime/symbolic_state` - Current symbolic state representation
 - `/prime/candidate_objects` - Candidate target objects
-- `/prime/control_mode` - Current control mode (translation/rotation/gripper)
-- `/prime/joystick_state` - Joystick input state
+- `/prime/control_mode` - GUI-selected control mode and active-command flag
+- `/prime/gui_teleop_event` - GUI action logs as JSON strings
 - `/prime/query` - Queries to user (questions/confirmations)
 - `/prime/tool_call` - Tool calls from LLM
 - `/prime/tool_result` - Tool execution results
@@ -127,15 +127,60 @@ The LLM can invoke these tools:
 
 ## User Input
 
-Users can respond to PRIME queries via:
+Teleoperation and responses are split:
 
-1. **Keyboard** (terminal):
+1. **GUI Teleop (`gui_teleop.py`)**
+   - Modes: `Translation`, `Rotation`, `Gripper`
+   - Press-and-hold axis buttons publish cartesian velocity on one axis only
+   - `STOP` immediately zeroes velocity
+   - `Open/Close` send finger action goals
+   - Publishes `/prime/control_mode` and `/prime/gui_teleop_event`
+
+2. **Keyboard Query Responses (`user_interface.py`)**
    - `y` / `1` = Yes / Option 1
    - `n` / `2` = No / Option 2
    - `3-5` = Options 3-5
    - `q` = Cancel query
 
-2. **Kinova Joystick** (button mapping configurable in params)
+## Testing
+
+### Automated Test
+
+```bash
+cd ~/catkin_ws
+catkin build prime_ros
+catkin run_tests prime_ros
+catkin_test_results build/prime_ros
+```
+
+Unit coverage is in `test/test_teleop_command_model.py` for:
+- Translation/rotation axis-isolated velocity mapping
+- Stop-to-zero behavior
+- Control mode flags and `joystick_active` semantics
+- GUI event JSON payload fields
+
+### Manual Teleop Smoke Test
+
+```bash
+cd ~/catkin_ws
+source devel/setup.bash
+roslaunch prime_ros prime.launch
+```
+
+In separate terminals:
+
+```bash
+rostopic echo /prime/control_mode
+rostopic echo /prime/gui_teleop_event
+rostopic echo /<robot_type>_driver/in/cartesian_velocity
+```
+
+Validation steps:
+1. Switch modes in the GUI and confirm `/prime/control_mode.mode` changes and motion is stopped.
+2. Press/hold `+X` in Translation mode and confirm only `twist_linear_x` is non-zero.
+3. Release the button and confirm velocity returns to all zeros immediately.
+4. Press/hold `-Rz` in Rotation mode and confirm only `twist_angular_z` is non-zero and negative.
+5. Click `Open`/`Close` in Gripper mode and confirm `/prime/gui_teleop_event` emits `type:\"gripper\"` entries.
 
 ## Symbolic State
 

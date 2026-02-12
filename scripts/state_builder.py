@@ -66,9 +66,18 @@ class StateBuilder:
             axis_signs.append(1.0)
         self.metric_axis_signs = [float(axis_signs[0]), float(axis_signs[1]), float(axis_signs[2])]
 
+        # Yaw handling (purely image-based yaw coming from YOLO masks)
+        # - YOLO publishes yaw in image coordinates (x right, y down) as det["mask_yaw_rad"].
+        # - We map that yaw into the same metric/grid frame as objects (using axis_signs flips),
+        #   then add an optional constant offset for camera-to-robot alignment.
+        self.use_mask_yaw = bool(rospy.get_param("state_builder/use_mask_yaw", True))
+        self.mask_yaw_field = str(rospy.get_param("state_builder/mask_yaw_field", "mask_yaw_rad")).strip()
+        self.yaw_offset_rad = float(rospy.get_param("workspace/yaw_offset_rad", 0.0))
+
         # State builder parameters
         self.update_rate = float(rospy.get_param("state_builder/update_rate", 10.0))
         self.history_length = int(rospy.get_param("state_builder/gripper_history_length", 10))
+        self.gui_event_history_length = int(rospy.get_param("state_builder/gui_event_history_length", 20))
         self.position_threshold = float(rospy.get_param("state_builder/position_threshold", 0.02))
 
         # Detection filtering + tracking (stable IDs)
@@ -91,6 +100,21 @@ class StateBuilder:
         self.publish_tentative_tracks = bool(rospy.get_param("state_builder/publish_tentative_tracks", False))
         self.tracks: Dict[str, dict] = {}
         self.next_track_id = 1
+        # Detection class filtering for objects.
+        # - object_classes: labels considered graspable objects (default: ["object"]).
+        # - ignored_detection_classes: labels to ignore when object_classes is empty or wildcard.
+        # This allows richer YOLO models (e.g., class names like "mug", "can", etc.).
+        raw_object_classes = rospy.get_param("state_builder/object_classes", ["object"])
+        raw_ignored_classes = rospy.get_param("state_builder/ignored_detection_classes", ["workspace", "jaco", "bin"])
+        try:
+            self.object_classes = [str(x) for x in list(raw_object_classes)]
+        except Exception:
+            self.object_classes = ["object"]
+        try:
+            self.ignored_detection_classes = set(str(x) for x in list(raw_ignored_classes))
+        except Exception:
+            self.ignored_detection_classes = {"workspace", "jaco", "bin"}
+        self._object_class_any = (len(self.object_classes) == 0) or ("*" in self.object_classes)
 
         # Inputs (cached)
         self.latest_detections = []
@@ -99,6 +123,8 @@ class StateBuilder:
         self.latest_yolo_image = None
         self.gripper_pose: Optional[PoseStamped] = None
         self.gripper_history = deque(maxlen=self.history_length)
+        self.last_gui_teleop_event_json = ""
+        self.gui_teleop_event_history = deque(maxlen=self.gui_event_history_length)
         self.control_mode: Optional[ControlMode] = None
 
         # Behavior toggles
@@ -115,6 +141,7 @@ class StateBuilder:
         )
         if MSGS_AVAILABLE:
             self.mode_sub = rospy.Subscriber("/prime/control_mode", ControlMode, self.control_mode_callback, queue_size=1)
+        self.gui_event_sub = rospy.Subscriber("/prime/gui_teleop_event", String, self.gui_event_callback, queue_size=50)
 
         self.yolo_img_sub = rospy.Subscriber("/yolo/image_with_bboxes", Image, self.yolo_image_callback, queue_size=1)
         self.yolo_dets_sub = rospy.Subscriber("/yolo/detections_json", String, self.yolo_detections_callback, queue_size=1)
@@ -181,6 +208,14 @@ class StateBuilder:
             self.latest_workspace_bbox = payload.get("workspace_bbox_xyxy", None)
             self.latest_grid_bbox = payload.get("grid_bbox_xyxy", self.latest_workspace_bbox)
 
+    def gui_event_callback(self, msg: String):
+        event_json = str(msg.data or "")
+        if not event_json:
+            return
+        with self.lock:
+            self.last_gui_teleop_event_json = event_json
+            self.gui_teleop_event_history.append(event_json)
+
     # -----------------------
     # Grid + metric mapping
     # -----------------------
@@ -190,6 +225,15 @@ class StateBuilder:
         if ws_bbox_xyxy is None:
             return None, None, None, None
         x1, y1, x2, y2 = ws_bbox_xyxy
+        # If the pixel is outside the workspace/grid bbox, treat it as "not on the workspace".
+        # This prevents wide-FOV cameras from mapping outside detections into edge grid cells.
+        try:
+            fx = float(cx)
+            fy = float(cy)
+        except Exception:
+            return None, None, None, None
+        if fx < float(x1) or fx > float(x2) or fy < float(y1) or fy > float(y2):
+            return None, None, None, None
         w = max(1.0, float(x2 - x1))
         h = max(1.0, float(y2 - y1))
         col = int((float(cx) - x1) / (w / 3.0))
@@ -266,7 +310,21 @@ class StateBuilder:
         # Measurements
         measured = []
         for det in self.latest_detections:
-            if det.get("class") != "object":
+            det_class = str(det.get("class", "")).strip()
+            if not det_class:
+                continue
+            if self._object_class_any:
+                if det_class in self.ignored_detection_classes:
+                    continue
+            else:
+                if det_class not in set(self.object_classes):
+                    continue
+                if det_class in self.ignored_detection_classes:
+                    continue
+
+            # Keep previous confidence threshold behavior
+            # (applies to any accepted object class).
+            if det_class in self.ignored_detection_classes:
                 continue
             conf = float(det.get("conf", 0.0))
             if conf < self.min_object_confidence:
@@ -274,6 +332,17 @@ class StateBuilder:
             px, py = det.get("pick_xy", det.get("center_xy", [None, None]))
             if px is None or py is None:
                 continue
+
+            yaw_img = None
+            if self.use_mask_yaw and self.mask_yaw_field:
+                try:
+                    yv = det.get(self.mask_yaw_field, None)
+                    if yv is not None:
+                        yaw_img = float(yv)
+                        if not np.isfinite(yaw_img):
+                            yaw_img = None
+                except Exception:
+                    yaw_img = None
 
             grid_label, cell_index, row, col = self.pixel_to_grid_label(px, py, self.latest_grid_bbox)
             if grid_label is None:
@@ -288,6 +357,8 @@ class StateBuilder:
                     "grid_cell": int(cell_index),
                     "grid_row": int(row),
                     "grid_col": int(col),
+                    "yaw_img": yaw_img,
+                    "label": det_class,
                 }
             )
 
@@ -315,10 +386,18 @@ class StateBuilder:
                 tr["px"] = int(round(alpha * m["px"] + (1.0 - alpha) * float(tr.get("px", m["px"]))))
                 tr["py"] = int(round(alpha * m["py"] + (1.0 - alpha) * float(tr.get("py", m["py"]))))
                 tr["conf"] = float(m["conf"])
+                tr["label"] = str(m.get("label", tr.get("label", "object")))
                 tr["grid_label"] = m["grid_label"]
                 tr["grid_cell"] = int(m["grid_cell"])
                 tr["grid_row"] = int(m["grid_row"])
                 tr["grid_col"] = int(m["grid_col"])
+                # Circular smoothing for yaw (store as unit vector components)
+                if m.get("yaw_img") is not None:
+                    y = float(m["yaw_img"])
+                    c = float(np.cos(y))
+                    s = float(np.sin(y))
+                    tr["yaw_c"] = float(alpha * c + (1.0 - alpha) * float(tr.get("yaw_c", c)))
+                    tr["yaw_s"] = float(alpha * s + (1.0 - alpha) * float(tr.get("yaw_s", s)))
                 tr["last_seen"] = now
                 tr["hits"] = int(tr.get("hits", 1)) + 1
                 if int(tr.get("hits", 0)) >= self.track_min_confirmations:
@@ -327,14 +406,23 @@ class StateBuilder:
             else:
                 oid = f"obj_{self.next_track_id}"
                 self.next_track_id += 1
+                yaw_c = None
+                yaw_s = None
+                if m.get("yaw_img") is not None:
+                    y = float(m["yaw_img"])
+                    yaw_c = float(np.cos(y))
+                    yaw_s = float(np.sin(y))
                 self.tracks[oid] = {
                     "px": int(m["px"]),
                     "py": int(m["py"]),
                     "conf": float(m["conf"]),
+                    "label": str(m.get("label", "object")),
                     "grid_label": m["grid_label"],
                     "grid_cell": int(m["grid_cell"]),
                     "grid_row": int(m["grid_row"]),
                     "grid_col": int(m["grid_col"]),
+                    "yaw_c": yaw_c if yaw_c is not None else 1.0,
+                    "yaw_s": yaw_s if yaw_s is not None else 0.0,
                     "last_seen": now,
                     "first_seen": now,
                     "hits": 1,
@@ -350,7 +438,7 @@ class StateBuilder:
                 continue
             obj = ObjectState()
             obj.object_id = oid
-            obj.label = "object"
+            obj.label = str(tr.get("label", "object"))
             obj.grid_cell = int(tr.get("grid_cell", 0))
             obj.grid_row = int(tr.get("grid_row", 0))
             obj.grid_col = int(tr.get("grid_col", 0))
@@ -359,7 +447,18 @@ class StateBuilder:
             x, y = self.grid_cell_center_xy(obj.grid_row, obj.grid_col)
             obj.position = Point(x=x, y=y, z=float(self.metric_object_z))
 
-            obj.yaw_orientation = 0.0
+            # Convert image-yaw to metric-yaw using axis_sign flips and a constant offset.
+            # Image convention: x right, y down.
+            # Metric convention here: x/y follow the workspace rectangle mapping.
+            try:
+                yaw_img = float(np.arctan2(float(tr.get("yaw_s", 0.0)), float(tr.get("yaw_c", 1.0))))
+                vx = float(np.cos(yaw_img))
+                vy = float(np.sin(yaw_img))
+                vx_m = float(self.metric_axis_signs[0]) * vx
+                vy_m = float(self.metric_axis_signs[1]) * vy
+                obj.yaw_orientation = float(np.arctan2(vy_m, vx_m) + float(self.yaw_offset_rad))
+            except Exception:
+                obj.yaw_orientation = 0.0
             obj.is_held = False
             obj.confidence = float(tr.get("conf", 0.0))
             obj.bbox_center_x = int(tr.get("px", 0))
@@ -424,6 +523,8 @@ class StateBuilder:
         else:
             state.control_mode = ControlMode()
             state.control_mode.mode = ControlMode.MODE_UNKNOWN
+        state.last_gui_teleop_event_json = str(self.last_gui_teleop_event_json)
+        state.gui_teleop_event_history_json = list(self.gui_teleop_event_history)
 
         # Grid config
         state.grid_rows = self.grid_rows
@@ -514,4 +615,3 @@ class StateBuilder:
 
 if __name__ == "__main__":
     StateBuilder().run()
-
