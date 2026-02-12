@@ -100,6 +100,21 @@ class StateBuilder:
         self.publish_tentative_tracks = bool(rospy.get_param("state_builder/publish_tentative_tracks", False))
         self.tracks: Dict[str, dict] = {}
         self.next_track_id = 1
+        # Detection class filtering for objects.
+        # - object_classes: labels considered graspable objects (default: ["object"]).
+        # - ignored_detection_classes: labels to ignore when object_classes is empty or wildcard.
+        # This allows richer YOLO models (e.g., class names like "mug", "can", etc.).
+        raw_object_classes = rospy.get_param("state_builder/object_classes", ["object"])
+        raw_ignored_classes = rospy.get_param("state_builder/ignored_detection_classes", ["workspace", "jaco", "bin"])
+        try:
+            self.object_classes = [str(x) for x in list(raw_object_classes)]
+        except Exception:
+            self.object_classes = ["object"]
+        try:
+            self.ignored_detection_classes = set(str(x) for x in list(raw_ignored_classes))
+        except Exception:
+            self.ignored_detection_classes = {"workspace", "jaco", "bin"}
+        self._object_class_any = (len(self.object_classes) == 0) or ("*" in self.object_classes)
 
         # Inputs (cached)
         self.latest_detections = []
@@ -295,7 +310,21 @@ class StateBuilder:
         # Measurements
         measured = []
         for det in self.latest_detections:
-            if det.get("class") != "object":
+            det_class = str(det.get("class", "")).strip()
+            if not det_class:
+                continue
+            if self._object_class_any:
+                if det_class in self.ignored_detection_classes:
+                    continue
+            else:
+                if det_class not in set(self.object_classes):
+                    continue
+                if det_class in self.ignored_detection_classes:
+                    continue
+
+            # Keep previous confidence threshold behavior
+            # (applies to any accepted object class).
+            if det_class in self.ignored_detection_classes:
                 continue
             conf = float(det.get("conf", 0.0))
             if conf < self.min_object_confidence:
@@ -329,6 +358,7 @@ class StateBuilder:
                     "grid_row": int(row),
                     "grid_col": int(col),
                     "yaw_img": yaw_img,
+                    "label": det_class,
                 }
             )
 
@@ -356,6 +386,7 @@ class StateBuilder:
                 tr["px"] = int(round(alpha * m["px"] + (1.0 - alpha) * float(tr.get("px", m["px"]))))
                 tr["py"] = int(round(alpha * m["py"] + (1.0 - alpha) * float(tr.get("py", m["py"]))))
                 tr["conf"] = float(m["conf"])
+                tr["label"] = str(m.get("label", tr.get("label", "object")))
                 tr["grid_label"] = m["grid_label"]
                 tr["grid_cell"] = int(m["grid_cell"])
                 tr["grid_row"] = int(m["grid_row"])
@@ -385,6 +416,7 @@ class StateBuilder:
                     "px": int(m["px"]),
                     "py": int(m["py"]),
                     "conf": float(m["conf"]),
+                    "label": str(m.get("label", "object")),
                     "grid_label": m["grid_label"],
                     "grid_cell": int(m["grid_cell"]),
                     "grid_row": int(m["grid_row"]),
@@ -406,7 +438,7 @@ class StateBuilder:
                 continue
             obj = ObjectState()
             obj.object_id = oid
-            obj.label = "object"
+            obj.label = str(tr.get("label", "object"))
             obj.grid_cell = int(tr.get("grid_cell", 0))
             obj.grid_row = int(tr.get("grid_row", 0))
             obj.grid_col = int(tr.get("grid_col", 0))

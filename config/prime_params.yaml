@@ -47,6 +47,11 @@ state_builder:
   gui_event_history_length: 20
   update_rate: 10.0  # Hz
   position_threshold: 0.02  # meters, minimum movement to update history
+  # Detection class filtering for modern YOLO label sets:
+  # - "*" accepts all detected classes as object candidates
+  # - ignored_detection_classes are excluded from PRIME suggestions
+  object_classes: ["*"]
+  ignored_detection_classes: ["workspace", "jaco"]
   # If true, use YOLO mask-based yaw (det["mask_yaw_rad"]) for ObjectState.yaw_orientation.
   # This is purely image-based and only reliable for elongated silhouettes.
   use_mask_yaw: true

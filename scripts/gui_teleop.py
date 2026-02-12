@@ -282,6 +282,7 @@ class GuiTeleopNode:
         self.oracle_objects = []
         self.oracle_gripper_hist = []
         self.oracle_choices = []
+        self.oracle_seen_symbolic_state = False
         self.oracle_status_var = None
         self.oracle_choices_frame = None
         # final enable already computed above
@@ -604,6 +605,7 @@ class GuiTeleopNode:
     def _oracle_state_callback(self, msg: SymbolicState):
         if not self.oracle_enabled:
             return
+        self.oracle_seen_symbolic_state = True
         objects = []
         for obj in msg.objects:
             cell_label = obj.grid_label or self._grid_label_from_index(
@@ -725,9 +727,20 @@ class GuiTeleopNode:
             if self.oracle_memory is None:
                 self._oracle_init_state()
 
-            if not self.oracle_objects or not self.oracle_gripper_hist:
+            if not self.oracle_seen_symbolic_state:
                 if self.oracle_status_var is not None:
                     self.oracle_status_var.set("Waiting for /prime/symbolic_state...")
+                return
+            if not self.oracle_objects:
+                if self.oracle_status_var is not None:
+                    self.oracle_status_var.set(
+                        "Symbolic state received, but no object detections. "
+                        "Check YOLO class mapping for state_builder/object_classes."
+                    )
+                return
+            if not self.oracle_gripper_hist:
+                if self.oracle_status_var is not None:
+                    self.oracle_status_var.set("Waiting for gripper pose/grid in symbolic state...")
                 return
 
             # Ensure candidates are populated.
