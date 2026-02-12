@@ -28,6 +28,8 @@ import rospy
 from geometry_msgs.msg import Point, PoseStamped
 from std_msgs.msg import Header, String
 from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+import cv2
 
 try:
     from prime_ros.msg import SymbolicState, ObjectState, ControlMode, CandidateSet
@@ -130,6 +132,11 @@ class StateBuilder:
         # Behavior toggles
         self.use_yolo_grid = bool(rospy.get_param("~use_yolo_grid", True))
         self.gripper_cell_from_yolo = bool(rospy.get_param("~gripper_cell_from_yolo", True))
+
+        # Yaw debug visualization
+        self.publish_yaw_debug = bool(rospy.get_param("state_builder/publish_yaw_debug", True))
+        self.yaw_debug_pub = rospy.Publisher("/prime/yaw_debug", Image, queue_size=2)
+        self.cv_bridge = CvBridge()
 
         # Subscribers
         driver_prefix = f"/{self.robot_type}_driver"
@@ -334,6 +341,7 @@ class StateBuilder:
                 continue
 
             yaw_img = None
+            yaw_ratio = 0.0
             if self.use_mask_yaw and self.mask_yaw_field:
                 try:
                     yv = det.get(self.mask_yaw_field, None)
@@ -341,6 +349,8 @@ class StateBuilder:
                         yaw_img = float(yv)
                         if not np.isfinite(yaw_img):
                             yaw_img = None
+                        else:
+                            yaw_ratio = float(det.get("mask_yaw_ratio", 0.0))
                 except Exception:
                     yaw_img = None
 
@@ -358,6 +368,7 @@ class StateBuilder:
                     "grid_row": int(row),
                     "grid_col": int(col),
                     "yaw_img": yaw_img,
+                    "yaw_ratio": yaw_ratio,
                     "label": det_class,
                 }
             )
@@ -398,6 +409,7 @@ class StateBuilder:
                     s = float(np.sin(y))
                     tr["yaw_c"] = float(alpha * c + (1.0 - alpha) * float(tr.get("yaw_c", c)))
                     tr["yaw_s"] = float(alpha * s + (1.0 - alpha) * float(tr.get("yaw_s", s)))
+                    tr["mask_yaw_ratio"] = float(m.get("yaw_ratio", 0.0))
                 tr["last_seen"] = now
                 tr["hits"] = int(tr.get("hits", 1)) + 1
                 if int(tr.get("hits", 0)) >= self.track_min_confirmations:
@@ -423,6 +435,7 @@ class StateBuilder:
                     "grid_col": int(m["grid_col"]),
                     "yaw_c": yaw_c if yaw_c is not None else 1.0,
                     "yaw_s": yaw_s if yaw_s is not None else 0.0,
+                    "mask_yaw_ratio": float(m.get("yaw_ratio", 0.0)),
                     "last_seen": now,
                     "first_seen": now,
                     "hits": 1,
@@ -572,6 +585,150 @@ class StateBuilder:
         return candidates, labels, confidences, reasoning
 
     # -----------------------
+    # Yaw debug visualization
+    # -----------------------
+    def publish_yaw_debug_image(self, objects: Dict[str, "ObjectState"]):
+        """Draw an overlay on the YOLO image showing each object's believed yaw
+        as an arrow, the gripper yaw, and text labels. Published on /prime/yaw_debug."""
+        if not self.publish_yaw_debug:
+            return
+        if self.yaw_debug_pub.get_num_connections() == 0:
+            return  # no subscribers, skip work
+
+        # Use the latest YOLO image as background; if unavailable, create a blank canvas
+        try:
+            if self.latest_yolo_image is not None:
+                canvas = self.cv_bridge.imgmsg_to_cv2(self.latest_yolo_image, "bgr8").copy()
+            else:
+                canvas = np.zeros((480, 640, 3), dtype=np.uint8)
+        except Exception:
+            canvas = np.zeros((480, 640, 3), dtype=np.uint8)
+
+        h, w = canvas.shape[:2]
+
+        # Colors
+        obj_arrow_color = (0, 255, 255)     # yellow: object yaw direction
+        obj_minor_color = (0, 180, 180)     # dim yellow: minor axis
+        gripper_color = (0, 255, 0)         # green: gripper yaw
+        text_color = (255, 255, 255)        # white
+        bg_color = (0, 0, 0)               # black text background
+        arrow_len = 50
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.45
+        thickness = 1
+
+        # Draw each tracked object's yaw
+        for oid, obj in objects.items():
+            tr = self.tracks.get(oid)
+            if tr is None:
+                continue
+
+            cx = int(tr.get("px", 0))
+            cy = int(tr.get("py", 0))
+            if cx <= 0 or cy <= 0 or cx >= w or cy >= h:
+                continue
+
+            label_str = str(tr.get("label", "?"))
+            yaw_c = float(tr.get("yaw_c", 1.0))
+            yaw_s = float(tr.get("yaw_s", 0.0))
+            yaw_img = float(np.arctan2(yaw_s, yaw_c))  # image-space yaw
+            yaw_deg = float(np.degrees(yaw_img))
+
+            # Convert to metric yaw (same transform as ObjectState)
+            vx = float(np.cos(yaw_img))
+            vy = float(np.sin(yaw_img))
+            vx_m = float(self.metric_axis_signs[0]) * vx
+            vy_m = float(self.metric_axis_signs[1]) * vy
+            metric_yaw = float(np.arctan2(vy_m, vx_m) + float(self.yaw_offset_rad))
+            metric_deg = float(np.degrees(metric_yaw))
+
+            # Elongation ratio from eigenvalues (if stored)
+            ratio = float(tr.get("mask_yaw_ratio", 0.0))
+
+            # Draw major axis arrow (image-space direction so it matches visible mask)
+            dx = int(round(arrow_len * np.cos(yaw_img)))
+            dy = int(round(arrow_len * np.sin(yaw_img)))
+            p1 = (cx - dx, cy - dy)
+            p2 = (cx + dx, cy + dy)
+            cv2.arrowedLine(canvas, (cx, cy), p2, obj_arrow_color, 2, tipLength=0.25)
+            cv2.line(canvas, p1, (cx, cy), obj_arrow_color, 1)
+
+            # Draw minor axis (perpendicular) as thin dashed-style
+            dx_m = int(round(arrow_len * 0.5 * np.cos(yaw_img + np.pi / 2)))
+            dy_m = int(round(arrow_len * 0.5 * np.sin(yaw_img + np.pi / 2)))
+            cv2.line(canvas, (cx - dx_m, cy - dy_m), (cx + dx_m, cy + dy_m), obj_minor_color, 1)
+
+            # Draw center dot
+            cv2.circle(canvas, (cx, cy), 4, obj_arrow_color, -1)
+
+            # Text: label + yaw info
+            stale = (rospy.get_time() - float(tr.get("last_seen", 0.0))) > 2.0
+            stale_str = " [stale]" if stale else ""
+            txt1 = f"{label_str} ({oid})"
+            txt2 = f"img:{yaw_deg:.0f}d  rob:{metric_deg:.0f}d{stale_str}"
+            txt3 = f"ratio:{ratio:.1f}" if ratio > 0 else ""
+
+            for i, txt in enumerate([txt1, txt2, txt3]):
+                if not txt:
+                    continue
+                ty = cy - 15 + i * 14
+                (tw, th), _ = cv2.getTextSize(txt, font, font_scale, thickness)
+                cv2.rectangle(canvas, (cx + 8, ty - th - 2), (cx + 10 + tw, ty + 2), bg_color, -1)
+                cv2.putText(canvas, txt, (cx + 9, ty), font, font_scale, text_color, thickness)
+
+        # Draw gripper yaw (if known)
+        if self.gripper_pose is not None:
+            gripper_yaw = self.get_gripper_yaw()
+            gripper_deg = float(np.degrees(gripper_yaw))
+
+            # If we have a jaco detection in latest_detections, use its pixel coords
+            jaco_cx, jaco_cy = None, None
+            if self.latest_detections:
+                jacs = [d for d in self.latest_detections if d.get("class") == "jaco"]
+                if jacs:
+                    jacs.sort(key=lambda d: float(d.get("conf", 0.0)), reverse=True)
+                    jxy = jacs[0].get("pick_xy", jacs[0].get("center_xy", [None, None]))
+                    if jxy[0] is not None:
+                        jaco_cx, jaco_cy = int(jxy[0]), int(jxy[1])
+
+            if jaco_cx is not None and jaco_cy is not None:
+                gdx = int(round(arrow_len * np.cos(gripper_yaw)))
+                gdy = int(round(arrow_len * np.sin(gripper_yaw)))
+                cv2.arrowedLine(canvas, (jaco_cx, jaco_cy),
+                                (jaco_cx + gdx, jaco_cy + gdy),
+                                gripper_color, 2, tipLength=0.25)
+                cv2.circle(canvas, (jaco_cx, jaco_cy), 5, gripper_color, -1)
+                txt = f"GRIPPER yaw:{gripper_deg:.0f}d"
+                (tw, th), _ = cv2.getTextSize(txt, font, font_scale, thickness)
+                cv2.rectangle(canvas, (jaco_cx + 8, jaco_cy - th - 18),
+                              (jaco_cx + 10 + tw, jaco_cy - 16), bg_color, -1)
+                cv2.putText(canvas, txt, (jaco_cx + 9, jaco_cy - 17),
+                            font, font_scale, gripper_color, thickness)
+
+        # Legend in top-left
+        legend_lines = [
+            "YAW DEBUG OVERLAY",
+            "Yellow arrow = object major axis (image frame)",
+            "Green arrow = gripper wrist yaw (robot frame)",
+            "img: image yaw | rob: robot yaw",
+            "[stale] = not seen recently (using memory)",
+        ]
+        for i, line in enumerate(legend_lines):
+            y = 18 + i * 16
+            (tw, th), _ = cv2.getTextSize(line, font, font_scale, thickness)
+            cv2.rectangle(canvas, (4, y - th - 2), (6 + tw, y + 3), bg_color, -1)
+            color = (0, 200, 255) if i == 0 else (180, 180, 180)
+            cv2.putText(canvas, line, (5, y), font, font_scale, color, thickness)
+
+        # Publish
+        try:
+            msg = self.cv_bridge.cv2_to_imgmsg(canvas, "bgr8")
+            msg.header.stamp = rospy.Time.now()
+            self.yaw_debug_pub.publish(msg)
+        except Exception:
+            pass
+
+    # -----------------------
     # Timer + service
     # -----------------------
     def update_state(self, _evt):
@@ -590,6 +747,8 @@ class StateBuilder:
                     cand.confidence_scores = confs
                     cand.reasoning = reason
                     self.candidates_pub.publish(cand)
+                # Publish yaw debug overlay
+                self.publish_yaw_debug_image(objects)
         except Exception as e:
             rospy.logerr("state_builder update_state crashed: %s", str(e))
             import traceback

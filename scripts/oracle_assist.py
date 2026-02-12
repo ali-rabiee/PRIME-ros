@@ -284,21 +284,18 @@ def oracle_decide_tool(
             clear_pending()
             return tool
         elif state.pending_mode == "ALIGN_YAW":
-            if current_yaw != target["yaw"]:
-                tool = _tool("ALIGN_YAW", {"obj": target["id"]})
-                clear_pending()
-                return tool
+            # IMPORTANT (PRIME integration):
+            # Same reasoning as APPROACH: quantized yaw bins may match even though
+            # the continuous wrist angle is not yet aligned to the object's mask yaw.
+            # Always execute one ALIGN_YAW when the user confirms.
+            tool = _tool("ALIGN_YAW", {"obj": target["id"]})
             clear_pending()
+            return tool
         else:
             # Same reasoning as above: prefer a single APPROACH even if cells match.
             tool = _tool("APPROACH", {"obj": target["id"]})
             clear_pending()
             return tool
-            if current_yaw != target["yaw"]:
-                tool = _tool("ALIGN_YAW", {"obj": target["id"]})
-                clear_pending()
-                return tool
-            clear_pending()
 
     if state.awaiting_confirmation:
         obj_id = state.selected_obj_id or state.intended_obj_id

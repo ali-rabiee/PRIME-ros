@@ -56,6 +56,8 @@ state_builder:
   # This is purely image-based and only reliable for elongated silhouettes.
   use_mask_yaw: true
   mask_yaw_field: "mask_yaw_rad"
+  # Publish /prime/yaw_debug image with arrows showing each object's believed yaw
+  publish_yaw_debug: true
   # Stabilization for YOLO detections -> PRIME objects
   min_object_confidence: 0.5
   # If publish_stale_tracks=false, tracks not seen for track_max_age seconds won't be published.
@@ -118,6 +120,12 @@ tools:
       missing_object_stop_frames: 2  # if target object isn't detected for N cycles, stop (assume occluded)
   align:
     tolerance: 0.1  # radians
+    # If true, add 90° to the object major-axis yaw so gripper fingers cross the
+    # narrow dimension (usually better for stable grasps on elongated objects).
+    perpendicular: true
+    # Extra constant offset (radians) applied on top of object yaw during ALIGN_YAW.
+    # Use to fine-tune alignment calibration.
+    extra_yaw_offset: 0.0
   grasp:
     finger_close_position: 5000  # Kinova units (0-6800)
     finger_open_position: 0

@@ -76,6 +76,12 @@ class ToolExecutor:
         self.pre_grasp_distance = rospy.get_param('tools/approach/pre_grasp_distance', 0.10)
         self.approach_speed = rospy.get_param('tools/approach/approach_speed', 0.1)
         self.align_tolerance = rospy.get_param('tools/align/tolerance', 0.1)
+        # If true, add π/2 to object yaw so gripper fingers cross the narrow dimension
+        # for a more stable grasp.  Set false if you want to align parallel to major axis.
+        self.align_yaw_perpendicular = bool(rospy.get_param('tools/align/perpendicular', True))
+        # Extra constant yaw offset (radians) applied on top of the object yaw during ALIGN_YAW.
+        # Use this to fine-tune alignment calibration.
+        self.align_yaw_extra_offset = float(rospy.get_param('tools/align/extra_yaw_offset', 0.0))
 
         # Pixel-servo refinement params (after reaching grid-cell center)
         # Default OFF: opt-in via `tools/approach/pixel_servo/enabled:=true`
@@ -886,16 +892,20 @@ class ToolExecutor:
     
     def execute_align_yaw(self, object_id: str) -> Tuple[bool, str]:
         """
-        Execute ALIGN_YAW tool - align gripper orientation with object.
-        
-        Rotates the gripper to match the object's yaw orientation.
+        Execute ALIGN_YAW tool — rotate gripper wrist to align with the object's
+        mask-based orientation for a stable grasp.
+
+        The object's yaw_orientation (from mask PCA → state_builder) gives the
+        direction of the object's major axis in the robot frame.
+
+        When `tools/align/perpendicular` is True (default), we add π/2 so the
+        gripper fingers cross the narrow dimension — usually better for grasping.
         """
         with self.lock:
             if object_id not in self.objects:
                 return False, f"Object {object_id} not found"
-            
             obj = self.objects[object_id]
-        
+
         # Get current pose
         current_pose = self.arm_group.get_current_pose()
         if self.safety_enabled:
@@ -903,31 +913,63 @@ class ToolExecutor:
             py = current_pose.pose.position.y
             pz = current_pose.pose.position.z
             if not self._in_bounds(px, py, pz):
-                return False, f"Current pose out of safety bounds ({self._bounds_str()}), got ({px:.3f},{py:.3f},{pz:.3f})"
-        
-        # Create target pose with adjusted yaw
+                return False, (
+                    f"Current pose out of safety bounds ({self._bounds_str()}), "
+                    f"got ({px:.3f},{py:.3f},{pz:.3f})"
+                )
+
+        # --- Compute target yaw ---
+        obj_yaw = float(obj.yaw_orientation)  # major-axis direction (robot frame)
+
+        # Optionally rotate 90° so fingers cross the narrow dimension
+        if self.align_yaw_perpendicular:
+            target_yaw = obj_yaw + np.pi / 2.0
+        else:
+            target_yaw = obj_yaw
+
+        # Apply any extra calibration offset
+        target_yaw += self.align_yaw_extra_offset
+
+        # Normalize to [-π, π]
+        target_yaw = float(np.arctan2(np.sin(target_yaw), np.cos(target_yaw)))
+
+        # Log useful diagnostics
+        cur_q = current_pose.pose.orientation
+        cur_siny = 2.0 * (cur_q.w * cur_q.z + cur_q.x * cur_q.y)
+        cur_cosy = 1.0 - 2.0 * (cur_q.y ** 2 + cur_q.z ** 2)
+        cur_yaw = float(np.arctan2(cur_siny, cur_cosy))
+        rospy.loginfo(
+            "ALIGN_YAW: obj=%s  obj_yaw=%.1f°  perp=%s  target_yaw=%.1f°  current_yaw=%.1f°  delta=%.1f°",
+            object_id,
+            np.degrees(obj_yaw),
+            self.align_yaw_perpendicular,
+            np.degrees(target_yaw),
+            np.degrees(cur_yaw),
+            np.degrees(target_yaw - cur_yaw),
+        )
+
+        # Create target pose: keep position, change orientation
         target_pose = PoseStamped()
         target_pose.header = current_pose.header
         target_pose.pose.position = current_pose.pose.position
-        
-        # Compute new orientation based on object yaw
-        # Keep gripper pointing down, rotate around z-axis
-        target_yaw = obj.yaw_orientation
+
+        # Gripper pointing down (pitch=π), rotated by target_yaw around z
         q = quaternion_from_euler(0, np.pi, target_yaw, 'sxyz')
         target_pose.pose.orientation = Quaternion(*q)
-        
-        rospy.loginfo(f"ALIGN_YAW: Aligning to {object_id} with yaw {np.degrees(target_yaw):.1f}°")
-        
+
         # Plan and execute
         self.arm_group.set_pose_target(target_pose)
         success = self.arm_group.go(wait=True)
         self.arm_group.stop()
         self.arm_group.clear_pose_targets()
-        
+
         if success:
-            return True, f"Aligned with {object_id}"
+            return True, (
+                f"Aligned with {object_id} — gripper yaw now {np.degrees(target_yaw):.1f}° "
+                f"(object major axis {np.degrees(obj_yaw):.1f}°, perpendicular={self.align_yaw_perpendicular})"
+            )
         else:
-            return False, f"Failed to align with {object_id}"
+            return False, f"Failed to align yaw with {object_id} (target {np.degrees(target_yaw):.1f}°)"
     
     def execute_grasp(self) -> Tuple[bool, str]:
         """

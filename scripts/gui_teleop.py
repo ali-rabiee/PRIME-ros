@@ -419,18 +419,58 @@ class GuiTeleopNode:
         self.tk = tk
         self.root = tk.Tk()
         self.root.title("PRIME GUI Teleop")
+        # Start maximized by default for better at-a-glance operation.
+        try:
+            self.root.state("zoomed")
+        except Exception:
+            # Fallback for window managers that do not support "zoomed".
+            sw = int(self.root.winfo_screenwidth())
+            sh = int(self.root.winfo_screenheight())
+            self.root.geometry(f"{sw}x{sh}+0+0")
+        self.root.minsize(1280, 800)
+        self.root.configure(bg="#1E1E2E")
 
-        main_frame = tk.Frame(self.root)
+        # Visual theme + sizing (larger targets for robot teleop safety/usability).
+        bg_main = "#1E1E2E"
+        bg_panel = "#2A2D3E"
+        bg_surface = "#34384A"
+        fg_primary = "#F0F3FA"
+        fg_muted = "#C4CADB"
+        accent = "#5CC8FF"
+        accent_active = "#2EA5E6"
+        warn = "#FF6B6B"
+        good = "#2ECC71"
+        btn_w = 13
+        btn_h = 3
+        base_font = ("Helvetica", 16, "bold")
+        mode_font = ("Helvetica", 17, "bold")
+        header_font = ("Helvetica", 16, "bold")
+        status_font = ("Helvetica", 14, "bold")
+
+        main_frame = tk.Frame(self.root, bg=bg_main)
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        left_panel = tk.Frame(main_frame)
-        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Split main window into two equal halves:
+        # - left: robot control
+        # - right: oracle assistance
+        left_panel = tk.Frame(main_frame, bg=bg_main)
+        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(12, 6), pady=12)
 
-        right_panel = tk.Frame(main_frame)
-        right_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=8, pady=6)
+        right_panel = tk.Frame(main_frame, bg=bg_main)
+        right_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(6, 12), pady=12)
 
-        mode_frame = tk.LabelFrame(left_panel, text="Mode Selector", padx=8, pady=6)
-        mode_frame.pack(fill=tk.X, padx=10, pady=6)
+        mode_frame = tk.LabelFrame(
+            left_panel,
+            text="Mode Selector",
+            padx=12,
+            pady=10,
+            bg=bg_panel,
+            fg=fg_primary,
+            bd=2,
+            relief=tk.GROOVE,
+            font=header_font,
+        )
+        mode_frame.pack(fill=tk.X, padx=10, pady=8)
 
         self.mode_var = tk.StringVar(value=TeleopCommandModel.MODE_TRANSLATION)
         self.mode_text_var = tk.StringVar(value="Mode: translation")
@@ -442,64 +482,197 @@ class GuiTeleopNode:
             value=TeleopCommandModel.MODE_TRANSLATION,
             variable=self.mode_var,
             command=self._on_mode_radio,
-        ).pack(side=tk.LEFT, padx=4)
+            indicatoron=0,
+            width=14,
+            height=2,
+            font=mode_font,
+            bg=bg_surface,
+            fg=fg_primary,
+            activebackground=accent,
+            activeforeground=fg_primary,
+            selectcolor=accent_active,
+            relief=tk.RAISED,
+            bd=2,
+            highlightthickness=0,
+            cursor="hand2",
+        ).pack(side=tk.LEFT, padx=6, pady=4)
         tk.Radiobutton(
             mode_frame,
             text="Rotation",
             value=TeleopCommandModel.MODE_ROTATION,
             variable=self.mode_var,
             command=self._on_mode_radio,
-        ).pack(side=tk.LEFT, padx=4)
+            indicatoron=0,
+            width=14,
+            height=2,
+            font=mode_font,
+            bg=bg_surface,
+            fg=fg_primary,
+            activebackground=accent,
+            activeforeground=fg_primary,
+            selectcolor=accent_active,
+            relief=tk.RAISED,
+            bd=2,
+            highlightthickness=0,
+            cursor="hand2",
+        ).pack(side=tk.LEFT, padx=6, pady=4)
         tk.Radiobutton(
             mode_frame,
             text="Gripper",
             value=TeleopCommandModel.MODE_GRIPPER,
             variable=self.mode_var,
             command=self._on_mode_radio,
-        ).pack(side=tk.LEFT, padx=4)
+            indicatoron=0,
+            width=14,
+            height=2,
+            font=mode_font,
+            bg=bg_surface,
+            fg=fg_primary,
+            activebackground=accent,
+            activeforeground=fg_primary,
+            selectcolor=accent_active,
+            relief=tk.RAISED,
+            bd=2,
+            highlightthickness=0,
+            cursor="hand2",
+        ).pack(side=tk.LEFT, padx=6, pady=4)
 
-        status_frame = tk.Frame(left_panel)
-        status_frame.pack(fill=tk.X, padx=10, pady=4)
-        tk.Label(status_frame, textvariable=self.mode_text_var, anchor="w").pack(fill=tk.X)
-        tk.Label(status_frame, textvariable=self.active_text_var, anchor="w").pack(fill=tk.X)
+        status_frame = tk.Frame(left_panel, bg=bg_main)
+        status_frame.pack(fill=tk.X, padx=10, pady=6)
+        tk.Label(
+            status_frame,
+            textvariable=self.mode_text_var,
+            anchor="w",
+            bg=bg_main,
+            fg=fg_primary,
+            font=status_font,
+        ).pack(fill=tk.X, pady=(0, 2))
+        tk.Label(
+            status_frame,
+            textvariable=self.active_text_var,
+            anchor="w",
+            bg=bg_main,
+            fg=fg_muted,
+            font=status_font,
+        ).pack(fill=tk.X)
 
-        buttons_frame = tk.LabelFrame(left_panel, text="Commands", padx=8, pady=8)
-        buttons_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=6)
-
-        self.translation_frame = tk.Frame(buttons_frame)
-        self.rotation_frame = tk.Frame(buttons_frame)
-        self.gripper_frame = tk.Frame(buttons_frame)
-
-        # Translation controls (semantics assume +X=forward, +Y=left, +Z=up).
-        self._add_hold_button(self.translation_frame, "Left", "x", 1)
-        self._add_hold_button(self.translation_frame, "Right", "x", -1)
-        self._add_hold_button(self.translation_frame, "Backward", "y", 1)
-        self._add_hold_button(self.translation_frame, "Forward", "y", -1)
-        self._add_hold_button(self.translation_frame, "Up", "z", 1)
-        self._add_hold_button(self.translation_frame, "Down", "z", -1)
-
-        self._add_hold_button(self.rotation_frame, "Down", "rx", 1)
-        self._add_hold_button(self.rotation_frame, "Up", "rx", -1)
-        self._add_hold_button(self.rotation_frame, "Left", "ry", 1)
-        self._add_hold_button(self.rotation_frame, "Right", "ry", -1)
-        self._add_hold_button(self.rotation_frame, "+Rot", "rz", 1)
-        self._add_hold_button(self.rotation_frame, "-Rot", "rz", -1)
-
-        tk.Button(self.gripper_frame, text="Open", width=10, command=lambda: self._gripper_action("open")).pack(
-            side=tk.LEFT, padx=4, pady=4
+        buttons_frame = tk.LabelFrame(
+            left_panel,
+            text="Commands",
+            padx=12,
+            pady=12,
+            bg=bg_panel,
+            fg=fg_primary,
+            bd=2,
+            relief=tk.GROOVE,
+            font=header_font,
         )
-        tk.Button(self.gripper_frame, text="Close", width=10, command=lambda: self._gripper_action("close")).pack(
-            side=tk.LEFT, padx=4, pady=4
+        buttons_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
+
+        self.translation_frame = tk.Frame(buttons_frame, bg=bg_panel)
+        self.rotation_frame = tk.Frame(buttons_frame, bg=bg_panel)
+        self.gripper_frame = tk.Frame(buttons_frame, bg=bg_panel)
+
+        # Translation controls (2 buttons per row).
+        t_row1 = tk.Frame(self.translation_frame, bg=bg_panel)
+        t_row1.pack(fill=tk.X)
+        self._add_hold_button(t_row1, "Left", "x", 1, width=btn_w, height=btn_h, font=base_font, bg=bg_surface, fg=fg_primary, activebackground=accent)
+        self._add_hold_button(t_row1, "Right", "x", -1, width=btn_w, height=btn_h, font=base_font, bg=bg_surface, fg=fg_primary, activebackground=accent)
+
+        t_row2 = tk.Frame(self.translation_frame, bg=bg_panel)
+        t_row2.pack(fill=tk.X)
+        self._add_hold_button(t_row2, "Backward", "y", 1, width=btn_w, height=btn_h, font=base_font, bg=bg_surface, fg=fg_primary, activebackground=accent)
+        self._add_hold_button(t_row2, "Forward", "y", -1, width=btn_w, height=btn_h, font=base_font, bg=bg_surface, fg=fg_primary, activebackground=accent)
+
+        t_row3 = tk.Frame(self.translation_frame, bg=bg_panel)
+        t_row3.pack(fill=tk.X)
+        self._add_hold_button(t_row3, "Up", "z", 1, width=btn_w, height=btn_h, font=base_font, bg=bg_surface, fg=fg_primary, activebackground=accent)
+        self._add_hold_button(t_row3, "Down", "z", -1, width=btn_w, height=btn_h, font=base_font, bg=bg_surface, fg=fg_primary, activebackground=accent)
+
+        # Rotation controls (2 buttons per row).
+        r_row1 = tk.Frame(self.rotation_frame, bg=bg_panel)
+        r_row1.pack(fill=tk.X)
+        self._add_hold_button(r_row1, "Down", "rx", 1, width=btn_w, height=btn_h, font=base_font, bg=bg_surface, fg=fg_primary, activebackground=accent)
+        self._add_hold_button(r_row1, "Up", "rx", -1, width=btn_w, height=btn_h, font=base_font, bg=bg_surface, fg=fg_primary, activebackground=accent)
+
+        r_row2 = tk.Frame(self.rotation_frame, bg=bg_panel)
+        r_row2.pack(fill=tk.X)
+        self._add_hold_button(r_row2, "Left", "ry", 1, width=btn_w, height=btn_h, font=base_font, bg=bg_surface, fg=fg_primary, activebackground=accent)
+        self._add_hold_button(r_row2, "Right", "ry", -1, width=btn_w, height=btn_h, font=base_font, bg=bg_surface, fg=fg_primary, activebackground=accent)
+
+        r_row3 = tk.Frame(self.rotation_frame, bg=bg_panel)
+        r_row3.pack(fill=tk.X)
+        self._add_hold_button(r_row3, "+Rot", "rz", 1, width=btn_w, height=btn_h, font=base_font, bg=bg_surface, fg=fg_primary, activebackground=accent)
+        self._add_hold_button(r_row3, "-Rot", "rz", -1, width=btn_w, height=btn_h, font=base_font, bg=bg_surface, fg=fg_primary, activebackground=accent)
+
+        # Gripper controls (same style: 2 buttons in one row).
+        g_row1 = tk.Frame(self.gripper_frame, bg=bg_panel)
+        g_row1.pack(fill=tk.X)
+        tk.Button(
+            g_row1,
+            text="Open",
+            width=btn_w,
+            height=btn_h,
+            font=base_font,
+            bg=good,
+            fg="#102A1C",
+            activebackground="#27AE60",
+            activeforeground=fg_primary,
+            relief=tk.RAISED,
+            bd=2,
+            cursor="hand2",
+            command=lambda: self._gripper_action("open"),
+        ).pack(side=tk.LEFT, padx=8, pady=8)
+        tk.Button(
+            g_row1,
+            text="Close",
+            width=btn_w,
+            height=btn_h,
+            font=base_font,
+            bg=warn,
+            fg="#3A0D0D",
+            activebackground="#E55050",
+            activeforeground=fg_primary,
+            relief=tk.RAISED,
+            bd=2,
+            cursor="hand2",
+            command=lambda: self._gripper_action("close"),
+        ).pack(
+            side=tk.LEFT, padx=8, pady=8
         )
 
-        stop_frame = tk.Frame(left_panel)
+        stop_frame = tk.Frame(left_panel, bg=bg_main)
         stop_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
-        tk.Button(stop_frame, text="STOP", width=14, command=self._on_stop_button).pack(side=tk.LEFT)
+        tk.Button(
+            stop_frame,
+            text="STOP",
+            width=20,
+            height=2,
+            font=("Helvetica", 18, "bold"),
+            bg="#D63031",
+            fg=fg_primary,
+            activebackground="#C0392B",
+            activeforeground=fg_primary,
+            relief=tk.RAISED,
+            bd=3,
+            cursor="hand2",
+            command=self._on_stop_button,
+        ).pack(side=tk.LEFT)
 
         # Oracle side panel (always show when requested, even if disabled)
         if self.oracle_enabled_requested:
-            self.oracle_panel = tk.LabelFrame(right_panel, text="Oracle Assist", padx=8, pady=8)
-            self.oracle_panel.pack(fill=tk.Y, expand=True)
+            self.oracle_panel = tk.LabelFrame(
+                right_panel,
+                text="Oracle Assist",
+                padx=12,
+                pady=12,
+                bg=bg_panel,
+                fg=fg_primary,
+                bd=2,
+                relief=tk.GROOVE,
+                font=header_font,
+            )
+            self.oracle_panel.pack(fill=tk.BOTH, expand=True)
             if not self.oracle_available:
                 status = "Oracle unavailable (import failed). Check logs."
             elif not PRIME_MSGS_AVAILABLE:
@@ -512,24 +685,55 @@ class GuiTeleopNode:
                 textvariable=self.oracle_status_var,
                 anchor="w",
                 justify="left",
-                wraplength=240,
-            ).pack(fill=tk.X, pady=(0, 8))
+                wraplength=520,
+                bg=bg_panel,
+                fg=fg_muted,
+                font=("Helvetica", 16, "bold"),
+            ).pack(fill=tk.X, pady=(0, 10))
 
-            btn_row = tk.Frame(self.oracle_panel)
+            btn_row = tk.Frame(self.oracle_panel, bg=bg_panel)
             btn_row.pack(fill=tk.X, pady=(0, 8))
-            ask_btn = tk.Button(btn_row, text="Ask assistance", width=16, command=self._oracle_ask_assistance)
+            ask_btn = tk.Button(
+                btn_row,
+                text="Ask assistance",
+                width=18,
+                height=2,
+                font=("Helvetica", 16, "bold"),
+                bg=accent,
+                fg="#0E2230",
+                activebackground=accent_active,
+                activeforeground=fg_primary,
+                relief=tk.RAISED,
+                bd=2,
+                cursor="hand2",
+                command=self._oracle_ask_assistance,
+            )
             ask_btn.pack(
                 side=tk.LEFT, padx=(0, 6)
             )
-            reset_btn = tk.Button(btn_row, text="Reset Oracle", width=12, command=self._oracle_reset)
+            reset_btn = tk.Button(
+                btn_row,
+                text="Reset Oracle",
+                width=14,
+                height=2,
+                font=("Helvetica", 16, "bold"),
+                bg=bg_surface,
+                fg=fg_primary,
+                activebackground="#4B5168",
+                activeforeground=fg_primary,
+                relief=tk.RAISED,
+                bd=2,
+                cursor="hand2",
+                command=self._oracle_reset,
+            )
             reset_btn.pack(side=tk.LEFT)
 
             if not self.oracle_enabled:
                 ask_btn.configure(state="disabled")
                 reset_btn.configure(state="disabled")
 
-            self.oracle_choices_frame = tk.Frame(self.oracle_panel)
-            self.oracle_choices_frame.pack(fill=tk.X, pady=(6, 0))
+            self.oracle_choices_frame = tk.Frame(self.oracle_panel, bg=bg_panel)
+            self.oracle_choices_frame.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
 
         self.root.bind_all("<ButtonRelease-1>", self._on_any_button_release, add="+")
         self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
@@ -537,11 +741,37 @@ class GuiTeleopNode:
         self._show_mode_frame(self.mode_var.get())
         self._schedule_ui_refresh()
 
-    def _add_hold_button(self, parent, label, axis, direction):
-        button = self.tk.Button(parent, text=label, width=8)
+    def _add_hold_button(
+        self,
+        parent,
+        label,
+        axis,
+        direction,
+        width=8,
+        height=2,
+        font=None,
+        bg=None,
+        fg=None,
+        activebackground=None,
+    ):
+        button = self.tk.Button(
+            parent,
+            text=label,
+            width=width,
+            height=height,
+            font=font,
+            bg=bg,
+            fg=fg,
+            activebackground=activebackground,
+            activeforeground=fg,
+            relief=self.tk.RAISED,
+            bd=2,
+            highlightthickness=0,
+            cursor="hand2",
+        )
         button.bind("<ButtonPress-1>", lambda _evt, a=axis, d=direction: self._start_motion(a, d))
         button.bind("<ButtonRelease-1>", lambda _evt: self._stop_motion(reason="release"))
-        button.pack(side=self.tk.LEFT, padx=4, pady=4)
+        button.pack(side=self.tk.LEFT, padx=8, pady=8)
 
     def _on_mode_radio(self):
         mode = self.mode_var.get()
@@ -686,9 +916,18 @@ class GuiTeleopNode:
             self.tk.Button(
                 self.oracle_choices_frame,
                 text=choice,
-                width=22,
+                width=28,
+                height=2,
+                font=("Helvetica", 16, "bold"),
+                bg="#3B425A",
+                fg="#F0F3FA",
+                activebackground="#5CC8FF",
+                activeforeground="#F0F3FA",
+                relief=self.tk.RAISED,
+                bd=2,
+                cursor="hand2",
                 command=lambda c=choice: self._oracle_on_choice(c),
-            ).pack(fill=self.tk.X, pady=2)
+            ).pack(fill=self.tk.X, pady=6)
 
     def _oracle_on_choice(self, choice_str: str):
         if not self.oracle_enabled:
