@@ -90,6 +90,11 @@ class ToolExecutor:
         # Safe wrist joint range: clamp joint-6 to [-wrist_limit, +wrist_limit] radians.
         # Kinova j2n6s300 can go continuous but hardware may flash red past ~±5.5 rad.
         self.align_wrist_limit = float(rospy.get_param('tools/align/wrist_limit', 5.0))
+        # Pitch angle for the "palm facing down" orientation in ALIGN_YAW Step A.
+        # 180° = exactly straight down but can hit Kinova joint limits.
+        # Default 160° = tilted ~20° back, safe margin while still facing the table.
+        down_pitch_deg = float(rospy.get_param('tools/align/down_pitch_deg', 160.0))
+        self.align_down_pitch = np.radians(down_pitch_deg)
 
         # Pixel-servo refinement params (after reaching grid-cell center)
         # Default OFF: opt-in via `tools/approach/pixel_servo/enabled:=true`
@@ -832,7 +837,9 @@ class ToolExecutor:
 
         # Prefer a short Cartesian translation first (more stable configs, keeps orientation)
         try:
-            waypoints = [current_pose.pose, target_pose.pose]
+            # Only pass the target — MoveIt starts from current state automatically.
+            # Including current_pose can cause "outside goal constraints" aborts.
+            waypoints = [target_pose.pose]
             cart_plan, fraction = self.arm_group.compute_cartesian_path(
                 waypoints,
                 0.01,   # eef_step
@@ -1085,97 +1092,74 @@ class ToolExecutor:
         q = quaternion_from_euler(0, np.pi, target_yaw, 'sxyz')
         target_pose.pose.orientation = Quaternion(*q)
 
-        # ---- Attempt 1: Cartesian path (position + orientation) ----
+        # ====================================================================
+        # Strategy: ALWAYS use two-step (position then wrist rotation).
+        #
+        # Combining position + orientation in a single Cartesian path causes
+        # the orientation interpolation to push joints 4/5 toward their
+        # hardware limits (Kinova red-light lockout).  Separating the two
+        # motions avoids this entirely:
+        #   Step A — Cartesian move to position (keep current orientation)
+        #   Step B — Pure wrist joint rotation (only joint 6 changes)
+        # ====================================================================
+
+        # ---- Two-step Cartesian — move above (palm down), then rotate wrist ----
+        # Step A: Cartesian move to target position with gripper pointing
+        # nearly straight down (palm facing table) using the CURRENT yaw.
+        # We use a pitch slightly less than π (e.g. 160°) to keep joints
+        # away from their hardware limits while still facing the table.
+        rospy.loginfo("ALIGN_YAW: Two-step — moving above %s (palm down) via Cartesian...", object_id)
+
+        # Orientation = gripper pointing straight down (pitch=π) with a small
+        # roll offset to keep joints away from hardware limits.
+        # down_pitch_deg=160 → tilt = π - 160° = 20° applied on ROLL axis.
+        roll_offset = np.pi - self.align_down_pitch  # e.g. 20° when down_pitch=160°
+        q_down = quaternion_from_euler(roll_offset, np.pi, cur_yaw, 'sxyz')
+
+        step_a_pose = Pose()
+        step_a_pose.position = target_pose.pose.position
+        step_a_pose.orientation = Quaternion(*q_down)
+
         self.arm_group.set_start_state_to_current_state()
+        move_ok = False
         try:
-            waypoints = [target_pose.pose]  # only target — MoveIt starts from current
-            cart_plan, fraction = self.arm_group.compute_cartesian_path(
-                waypoints,
+            cart_a, frac_a = self.arm_group.compute_cartesian_path(
+                [step_a_pose],
                 0.01,   # eef_step
                 True,   # avoid_collisions
             )
-            npts = 0
-            if cart_plan is not None and hasattr(cart_plan, "joint_trajectory"):
-                npts = len(cart_plan.joint_trajectory.points)
-            if fraction >= 0.90 and npts > 0:
-                # Retime trajectory for safety
-                cart_plan = self._retime_trajectory(
-                    cart_plan, self.align_velocity_scale, self.align_accel_scale
+            npts_a = 0
+            if cart_a is not None and hasattr(cart_a, "joint_trajectory"):
+                npts_a = len(cart_a.joint_trajectory.points)
+            if frac_a >= 0.80 and npts_a > 0:
+                cart_a = self._retime_trajectory(
+                    cart_a, self.align_velocity_scale, self.align_accel_scale
                 )
                 rospy.loginfo(
-                    "ALIGN_YAW: Cartesian path fraction=%.2f (%d pts). Executing...",
-                    fraction, npts,
+                    "ALIGN_YAW step A: Cartesian fraction=%.2f (%d pts). "
+                    "Moving above object with palm facing down...",
+                    frac_a, npts_a,
                 )
-                success = self.arm_group.execute(cart_plan, wait=True)
+                move_ok = self.arm_group.execute(cart_a, wait=True)
                 self.arm_group.stop()
                 self.arm_group.clear_pose_targets()
-                if success:
-                    return True, (
-                        f"Aligned with {object_id} — moved above object and "
-                        f"gripper yaw set to {np.degrees(target_yaw):.1f}°"
-                    )
-                rospy.logwarn("ALIGN_YAW: Cartesian execution failed, falling back to planner.")
             else:
                 rospy.logwarn(
-                    "ALIGN_YAW: Cartesian fraction=%.2f (%d pts), falling back to planner.",
-                    fraction, npts,
+                    "ALIGN_YAW step A: Cartesian fraction=%.2f too low. Cannot safely move above object.",
+                    frac_a,
                 )
         except Exception as e:
-            rospy.logwarn("ALIGN_YAW: Cartesian path error (%s), falling back.", str(e))
-
-        # ---- Attempt 2: OMPL planner (full 6-DOF pose target) ----
-        prev_goal_tol = self.arm_group.get_goal_joint_tolerance()
-        self.arm_group.set_goal_orientation_tolerance(0.05)  # ~2.9° — relaxed for reachability
-        self.arm_group.set_planning_time(10.0)
-        self.arm_group.set_num_planning_attempts(8)
-
-        self.arm_group.set_pose_target(target_pose)
-        plan = self.arm_group.plan()
-        if isinstance(plan, tuple):
-            plan_success = plan[0]
-            trajectory = plan[1]
-        else:
-            trajectory = plan
-            plan_success = trajectory is not None and len(trajectory.joint_trajectory.points) > 0
-
-        if plan_success:
-            rospy.loginfo("ALIGN_YAW: OMPL plan found. Executing...")
-            success = self.arm_group.execute(trajectory, wait=True)
-            self.arm_group.stop()
-        else:
-            success = False
-            rospy.logwarn("ALIGN_YAW: OMPL planning failed for full pose target.")
-        self.arm_group.clear_pose_targets()
-        self.arm_group.set_planning_time(10.0)
-        self.arm_group.set_num_planning_attempts(5)
-        self.arm_group.set_goal_joint_tolerance(prev_goal_tol)
-
-        if success:
-            return True, (
-                f"Aligned with {object_id} — moved above object and "
-                f"gripper yaw set to {np.degrees(target_yaw):.1f}°"
-            )
-
-        # ---- Attempt 3: Two-step fallback — move above first, then rotate wrist ----
-        rospy.logwarn("ALIGN_YAW: Full pose planning failed. Trying two-step: move then rotate...")
-
-        # Step A: Move above object (keep current orientation)
-        step_a_pose = PoseStamped()
-        step_a_pose.header = target_pose.header
-        step_a_pose.pose.position = target_pose.pose.position
-        step_a_pose.pose.orientation = current_pose.pose.orientation  # keep current orientation
-
-        self.arm_group.set_pose_target(step_a_pose)
-        move_ok = self.arm_group.go(wait=True)
-        self.arm_group.stop()
-        self.arm_group.clear_pose_targets()
+            rospy.logwarn("ALIGN_YAW step A: Cartesian error: %s", str(e))
 
         if not move_ok:
             return False, (
-                f"Failed to move above {object_id} at ({tx:.3f},{ty:.3f},{tz:.3f})"
+                f"Cannot safely move above {object_id} at ({tx:.3f},{ty:.3f},{tz:.3f}) — "
+                f"Cartesian path blocked. Try moving the arm closer first."
             )
 
-        # Step B: Rotate wrist joint to target yaw (with clamping)
+        # Step B: Rotate wrist joint only (with clamping).
+        # Using set_joint_value_target with only joint 6 changed keeps all
+        # other joints fixed, preventing any arm reconfiguration.
         try:
             joint_values = list(self.arm_group.get_current_joint_values())
             if len(joint_values) >= 6:

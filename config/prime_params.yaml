@@ -136,6 +136,11 @@ tools:
     # Safe wrist-joint (joint 6) range in radians. Wrist values are wrapped into
     # [-wrist_limit, +wrist_limit] to prevent Kinova hardware faults.
     wrist_limit: 5.0
+    # Pitch angle (degrees) for the "palm facing down" pose in Step A.
+    # 180 = exactly vertical (can hit joint limits on Kinova).
+    # 160 = tilted ~20° back — safe margin while still facing the table.
+    # Decrease if you still get red lights; increase toward 180 for more vertical.
+    down_pitch_deg: 160.0
   grasp:
     finger_close_position: 5000  # Kinova units (0-6800)
     finger_open_position: 0
