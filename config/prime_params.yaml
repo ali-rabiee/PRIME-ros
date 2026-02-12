@@ -126,6 +126,16 @@ tools:
     # Extra constant offset (radians) applied on top of object yaw during ALIGN_YAW.
     # Use to fine-tune alignment calibration.
     extra_yaw_offset: 0.0
+    # Velocity / acceleration scaling during ALIGN_YAW (0.0-1.0).
+    # Lower = slower, gentler motion.  0.4 avoids red-light joint-limit warnings.
+    velocity_scaling: 0.4
+    acceleration_scaling: 0.4
+    # Extra clearance (m) above object beyond pre_grasp_distance for ALIGN_YAW.
+    # Increase if the arm still reaches near z-limits while rotating.
+    extra_clearance: 0.0
+    # Safe wrist-joint (joint 6) range in radians. Wrist values are wrapped into
+    # [-wrist_limit, +wrist_limit] to prevent Kinova hardware faults.
+    wrist_limit: 5.0
   grasp:
     finger_close_position: 5000  # Kinova units (0-6800)
     finger_open_position: 0
