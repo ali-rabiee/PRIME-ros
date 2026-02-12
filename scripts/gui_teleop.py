@@ -488,12 +488,13 @@ class GuiTeleopNode:
             font=mode_font,
             bg=bg_surface,
             fg=fg_primary,
-            activebackground=accent,
+            activebackground=bg_surface,
             activeforeground=fg_primary,
             selectcolor=accent_active,
             relief=tk.RAISED,
             bd=2,
             highlightthickness=0,
+            takefocus=False,
             cursor="hand2",
         ).pack(side=tk.LEFT, padx=6, pady=4)
         tk.Radiobutton(
@@ -508,12 +509,13 @@ class GuiTeleopNode:
             font=mode_font,
             bg=bg_surface,
             fg=fg_primary,
-            activebackground=accent,
+            activebackground=bg_surface,
             activeforeground=fg_primary,
             selectcolor=accent_active,
             relief=tk.RAISED,
             bd=2,
             highlightthickness=0,
+            takefocus=False,
             cursor="hand2",
         ).pack(side=tk.LEFT, padx=6, pady=4)
         tk.Radiobutton(
@@ -528,12 +530,13 @@ class GuiTeleopNode:
             font=mode_font,
             bg=bg_surface,
             fg=fg_primary,
-            activebackground=accent,
+            activebackground=bg_surface,
             activeforeground=fg_primary,
             selectcolor=accent_active,
             relief=tk.RAISED,
             bd=2,
             highlightthickness=0,
+            takefocus=False,
             cursor="hand2",
         ).pack(side=tk.LEFT, padx=6, pady=4)
 
@@ -616,11 +619,12 @@ class GuiTeleopNode:
             font=base_font,
             bg=good,
             fg="#102A1C",
-            activebackground="#27AE60",
-            activeforeground=fg_primary,
+            activebackground=good,
+            activeforeground="#102A1C",
             relief=tk.RAISED,
             bd=2,
             cursor="hand2",
+            takefocus=False,
             command=lambda: self._gripper_action("open"),
         ).pack(side=tk.LEFT, padx=8, pady=8)
         tk.Button(
@@ -631,11 +635,12 @@ class GuiTeleopNode:
             font=base_font,
             bg=warn,
             fg="#3A0D0D",
-            activebackground="#E55050",
-            activeforeground=fg_primary,
+            activebackground=warn,
+            activeforeground="#3A0D0D",
             relief=tk.RAISED,
             bd=2,
             cursor="hand2",
+            takefocus=False,
             command=lambda: self._gripper_action("close"),
         ).pack(
             side=tk.LEFT, padx=8, pady=8
@@ -651,11 +656,12 @@ class GuiTeleopNode:
             font=("Helvetica", 18, "bold"),
             bg="#D63031",
             fg=fg_primary,
-            activebackground="#C0392B",
+            activebackground="#D63031",
             activeforeground=fg_primary,
             relief=tk.RAISED,
             bd=3,
             cursor="hand2",
+            takefocus=False,
             command=self._on_stop_button,
         ).pack(side=tk.LEFT)
 
@@ -701,11 +707,12 @@ class GuiTeleopNode:
                 font=("Helvetica", 16, "bold"),
                 bg=accent,
                 fg="#0E2230",
-                activebackground=accent_active,
-                activeforeground=fg_primary,
+                activebackground=accent,
+                activeforeground="#0E2230",
                 relief=tk.RAISED,
                 bd=2,
                 cursor="hand2",
+                takefocus=False,
                 command=self._oracle_ask_assistance,
             )
             ask_btn.pack(
@@ -719,11 +726,12 @@ class GuiTeleopNode:
                 font=("Helvetica", 16, "bold"),
                 bg=bg_surface,
                 fg=fg_primary,
-                activebackground="#4B5168",
+                activebackground=bg_surface,
                 activeforeground=fg_primary,
                 relief=tk.RAISED,
                 bd=2,
                 cursor="hand2",
+                takefocus=False,
                 command=self._oracle_reset,
             )
             reset_btn.pack(side=tk.LEFT)
@@ -754,23 +762,45 @@ class GuiTeleopNode:
         fg=None,
         activebackground=None,
     ):
+        rest_bg = bg or "#34384A"
+        pressed_bg = activebackground or "#5CC8FF"
+        rest_fg = fg or "#F0F3FA"
+        pressed_fg = fg or "#F0F3FA"
+
         button = self.tk.Button(
             parent,
             text=label,
             width=width,
             height=height,
             font=font,
-            bg=bg,
-            fg=fg,
-            activebackground=activebackground,
-            activeforeground=fg,
+            bg=rest_bg,
+            fg=rest_fg,
+            # Disable Tk's built-in active highlight — we handle it ourselves
+            # so touchscreens don't show the blue "focus" state on first tap.
+            activebackground=rest_bg,
+            activeforeground=rest_fg,
             relief=self.tk.RAISED,
             bd=2,
             highlightthickness=0,
+            takefocus=False,
             cursor="hand2",
         )
-        button.bind("<ButtonPress-1>", lambda _evt, a=axis, d=direction: self._start_motion(a, d))
-        button.bind("<ButtonRelease-1>", lambda _evt: self._stop_motion(reason="release"))
+
+        def on_press(_evt, a=axis, d=direction):
+            # Force focus away from any previously focused widget so the
+            # press event fires immediately (critical for touchscreens).
+            button.focus_set()
+            button.configure(bg=pressed_bg, relief=self.tk.SUNKEN)
+            self._start_motion(a, d)
+
+        def on_release(_evt):
+            button.configure(bg=rest_bg, relief=self.tk.RAISED)
+            self._stop_motion(reason="release")
+
+        button.bind("<ButtonPress-1>", on_press)
+        button.bind("<ButtonRelease-1>", on_release)
+        # Also stop when finger/cursor leaves button while pressed.
+        button.bind("<Leave>", lambda _evt: on_release(_evt) if self.model.is_motion_active() else None)
         button.pack(side=self.tk.LEFT, padx=8, pady=8)
 
     def _on_mode_radio(self):
@@ -921,11 +951,12 @@ class GuiTeleopNode:
                 font=("Helvetica", 16, "bold"),
                 bg="#3B425A",
                 fg="#F0F3FA",
-                activebackground="#5CC8FF",
+                activebackground="#3B425A",
                 activeforeground="#F0F3FA",
                 relief=self.tk.RAISED,
                 bd=2,
                 cursor="hand2",
+                takefocus=False,
                 command=lambda c=choice: self._oracle_on_choice(c),
             ).pack(fill=self.tk.X, pady=6)
 
