@@ -1,0 +1,6 @@
+1. make sure everything including the robot base, workspace, camera , and so on are on the right 	place (blue tapes)
+2. turn on the robot and go to home position by clicking the corresponding button on the joystick
+3. roslaunch prime_ros prime_full.launch
+4. for viewing the camera view run: rqt_image_view in a new terminal
+5. login to the microsoft laptop (pass:454645) and run the Nomachine for connecting to the host 	and providing the GUI to the user.
+

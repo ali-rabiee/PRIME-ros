@@ -34,6 +34,22 @@
        Leaving this false avoids MoveIt/octomap using a wrong transform. -->
   <arg name="connect_camera_tf" default="false"/>
 
+  <!-- Logging / evaluation -->
+  <arg name="enable_logging" default="false"/>
+  <arg name="log_root" default="/home/tnlab/Desktop/PRIME_LOGS"/>
+  <arg name="run_tag" default=""/>
+  <arg name="session_start_mode" default="first_event"/>
+  <arg name="log_video" default="true"/>
+  <arg name="video_topic" default="/camera/color/image_raw"/>
+  <arg name="video_fps" default="30.0"/>
+  <arg name="log_trajectory" default="true"/>
+  <arg name="trajectory_rate_hz" default="30.0"/>
+  <arg name="log_collisions" default="false"/>
+  <arg name="collision_service" default="/check_state_validity"/>
+  <arg name="collision_group" default="arm"/>
+  <arg name="collision_rate_hz" default="5.0"/>
+  <arg name="collision_log_all" default="false"/>
+
   <!-- 1) Kinova robot driver -->
   <include file="$(find kinova_bringup)/launch/kinova_robot.launch">
     <arg name="kinova_robotType" value="$(arg robot_type)"/>
@@ -84,6 +100,24 @@
     <arg name="robot_type" value="$(arg robot_type)"/>
     <arg name="start_llm" value="false"/>
   </include>
+
+  <!-- 7) PRIME logger (optional) -->
+  <node if="$(arg enable_logging)" pkg="prime_ros" type="prime_logger.py" name="prime_logger" output="screen">
+    <param name="robot_type" value="$(arg robot_type)"/>
+    <param name="log_root" value="$(arg log_root)"/>
+    <param name="run_tag" value="$(arg run_tag)"/>
+    <param name="session_start_mode" value="$(arg session_start_mode)"/>
+    <param name="log_video" value="$(arg log_video)"/>
+    <param name="video_topic" value="$(arg video_topic)"/>
+    <param name="video_fps" value="$(arg video_fps)"/>
+    <param name="log_trajectory" value="$(arg log_trajectory)"/>
+    <param name="trajectory_rate_hz" value="$(arg trajectory_rate_hz)"/>
+    <param name="log_collisions" value="$(arg log_collisions)"/>
+    <param name="collision_service" value="$(arg collision_service)"/>
+    <param name="collision_group" value="$(arg collision_group)"/>
+    <param name="collision_rate_hz" value="$(arg collision_rate_hz)"/>
+    <param name="collision_log_all" value="$(arg collision_log_all)"/>
+  </node>
 
 </launch>
 

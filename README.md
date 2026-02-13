@@ -88,6 +88,58 @@ If robot and perception are already running:
 roslaunch prime_ros prime.launch robot_type:=j2n6s300
 ```
 
+### Evaluation Logging (prime_full.launch)
+
+PRIME includes an optional, non-invasive logger node that records session metrics,
+trajectories, tool calls/results, and video into an external folder. Each run
+creates a time-stamped subdirectory inside the log root:
+
+```
+/home/tnlab/Desktop/PRIME_LOGS/YYYYMMDD_HHMMSS[_run_tag]/
+```
+
+Example:
+```bash
+roslaunch prime_ros prime_full.launch \
+  robot_type:=j2n6s300 \
+  enable_logging:=true \
+  log_root:=/home/tnlab/Desktop/PRIME_LOGS \
+  run_tag:=pilot01 \
+  log_video:=true \
+  log_collisions:=true
+```
+
+**Logging outputs per run:**
+- `run_info.json` - run metadata + parameters
+- `session.json` - start/end time + session length
+- `metrics.json` - session length, grasp success, collisions, sample counts
+- `tool_calls.jsonl` - tool call stream
+- `tool_results.jsonl` - tool results (used for grasp success)
+- `trajectory_joint.jsonl` - joint trajectory samples
+- `trajectory_pose.jsonl` - end-effector pose samples
+- `gui_events.jsonl` - GUI event stream
+- `collisions.jsonl` - collision checks (if enabled)
+- `video.mp4` - run video (if enabled)
+
+**prime_full.launch logging args:**
+- `enable_logging` (bool, default `false`): enable the logger node
+- `log_root` (string, default `/home/tnlab/Desktop/PRIME_LOGS`): output root
+- `run_tag` (string, default empty): optional tag appended to run folder name
+- `session_start_mode` (string, default `first_event`): one of `node_start`, `first_event`, `first_tool_call`, `first_tool_result`
+- `log_video` (bool, default `true`): record `video.mp4`
+- `video_topic` (string, default `/camera/color/image_raw`): image source
+- `video_fps` (float, default `30.0`): video writer FPS
+- `log_trajectory` (bool, default `true`): record joint + pose trajectories
+- `trajectory_rate_hz` (float, default `30.0`): trajectory sampling rate
+- `log_collisions` (bool, default `false`): run MoveIt collision checks
+- `collision_service` (string, default `/check_state_validity`): MoveIt validity service
+- `collision_group` (string, default `arm`): MoveIt planning group
+- `collision_rate_hz` (float, default `5.0`): collision check rate
+- `collision_log_all` (bool, default `false`): log all checks (not just collisions)
+
+**Note:** logging uses MoveIt’s state-validity service for collision checks. If
+the service name differs in your setup, override `collision_service`.
+
 ### Configuration
 
 Edit `config/prime_params.yaml` for:

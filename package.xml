@@ -18,6 +18,8 @@
   <build_depend>geometry_msgs</build_depend>
   <build_depend>sensor_msgs</build_depend>
   <build_depend>kinova_msgs</build_depend>
+  <build_depend>moveit_msgs</build_depend>
+  <build_depend>cv_bridge</build_depend>
   <build_depend>rospy</build_depend>
   <build_depend>roscpp</build_depend>
   <build_depend>actionlib</build_depend>
@@ -31,6 +33,8 @@
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>kinova_msgs</exec_depend>
+  <exec_depend>moveit_msgs</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
   <exec_depend>kinova_driver</exec_depend>
   <exec_depend>moveit_ros_planning_interface</exec_depend>
   <exec_depend>moveit_commander</exec_depend>
