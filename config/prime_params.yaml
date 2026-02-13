@@ -128,8 +128,8 @@ tools:
     extra_yaw_offset: 0.0
     # Velocity / acceleration scaling during ALIGN_YAW (0.0-1.0).
     # Lower = slower, gentler motion.  0.4 avoids red-light joint-limit warnings.
-    velocity_scaling: 0.4
-    acceleration_scaling: 0.4
+    velocity_scaling: 1.0
+    acceleration_scaling: 1.0
     # Extra clearance (m) above object beyond pre_grasp_distance for ALIGN_YAW.
     # Increase if the arm still reaches near z-limits while rotating.
     extra_clearance: 0.0
