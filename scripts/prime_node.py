@@ -110,6 +110,7 @@ class PRIMENode:
                 ToolResult,
                 self.tool_result_callback
             )
+
         
         # Publishers
         if MSGS_AVAILABLE:
@@ -277,6 +278,7 @@ class PRIMENode:
                 # Publish tool call (tool_executor will handle it)
                 if self.tool_pub:
                     self.tool_pub.publish(call)
+
     
     def main_loop(self, event):
         """Main PRIME control loop."""

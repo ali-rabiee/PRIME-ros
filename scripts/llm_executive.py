@@ -24,6 +24,7 @@ import json
 import requests
 from typing import Optional, Dict, Any, Tuple
 from threading import Lock
+from std_msgs.msg import String
 
 # Ensure local PRIME scripts directory is on PYTHONPATH (rosrun wrapper doesn't add it)
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -101,6 +102,9 @@ class LLMExecutive:
                 PRIMEQuery,
                 queue_size=10
             )
+        self.llm_event_pub = rospy.Publisher('/prime/llm_event', String, queue_size=50)
+        self.session_id = f"llm_{rospy.Time.now().to_nsec()}"
+        self._publish_llm_event("session_start", {"session_id": self.session_id, "model": self.model})
         
         rospy.loginfo(f"LLM Executive initialized with model: {self.model}")
     
@@ -216,6 +220,26 @@ Recent actions:
 Based on this information, decide your next action. Output ONLY valid JSON."""
         
         return prompt
+
+    @staticmethod
+    def _truncate_text(text: str, limit: int = 2000) -> str:
+        if text is None:
+            return ""
+        if len(text) <= limit:
+            return text
+        return text[:limit] + "…"
+
+    def _publish_llm_event(self, event_type: str, payload: Dict[str, Any]):
+        try:
+            data = {
+                "event": str(event_type),
+                "stamp": rospy.Time.now().to_sec(),
+                "session_id": self.session_id,
+                "payload": payload,
+            }
+            self.llm_event_pub.publish(String(data=json.dumps(data, sort_keys=True)))
+        except Exception:
+            pass
     
     def call_llm(self, prompt: str) -> Tuple[Optional[Dict], str]:
         """
@@ -243,10 +267,12 @@ Based on this information, decide your next action. Output ONLY valid JSON."""
             
             if response.status_code != 200:
                 rospy.logerr(f"LLM API error: {response.status_code}")
+                self._publish_llm_event("api_error", {"status_code": int(response.status_code)})
                 return None, f"API error: {response.status_code}"
             
             result = response.json()
             raw_text = result.get('response', '')
+            self._publish_llm_event("response_received", {"raw_text": self._truncate_text(raw_text)})
             
             # Parse JSON from response
             # Try to extract JSON from the response
@@ -260,16 +286,20 @@ Based on this information, decide your next action. Output ONLY valid JSON."""
                     return parsed, raw_text
                 else:
                     rospy.logwarn(f"No JSON found in response: {raw_text}")
+                    self._publish_llm_event("no_json", {"raw_text": self._truncate_text(raw_text)})
                     return None, raw_text
             except json.JSONDecodeError as e:
                 rospy.logwarn(f"JSON parse error: {e}")
+                self._publish_llm_event("parse_error", {"error": str(e), "raw_text": self._truncate_text(raw_text)})
                 return None, raw_text
                 
         except requests.exceptions.Timeout:
             rospy.logerr("LLM API timeout")
+            self._publish_llm_event("api_timeout", {"timeout_sec": float(self.timeout)})
             return None, "Timeout"
         except requests.exceptions.RequestException as e:
             rospy.logerr(f"LLM API request error: {e}")
+            self._publish_llm_event("api_request_error", {"error": str(e)})
             return None, str(e)
     
     def parse_tool_call(self, response: Dict) -> Optional[ToolCall]:
@@ -280,6 +310,8 @@ Based on this information, decide your next action. Output ONLY valid JSON."""
         tool_name = response.get('tool', '').upper()
         params = response.get('params', {})
         reasoning = response.get('reasoning', '')
+        if not tool_name:
+            self._publish_llm_event("tool_missing", {"response": response})
         
         call = ToolCall()
         call.header.stamp = rospy.Time.now()
@@ -297,6 +329,7 @@ Based on this information, decide your next action. Output ONLY valid JSON."""
             pass  # No additional params needed
         else:
             rospy.logwarn(f"Unknown tool: {tool_name}")
+            self._publish_llm_event("unknown_tool", {"tool_name": tool_name, "response": response})
             return None
         
         return call
@@ -344,6 +377,18 @@ Based on this information, decide your next action. Output ONLY valid JSON."""
             
             # Build prompt
             prompt = self.build_prompt(self.current_state)
+            try:
+                memory_ctx = self.memory.get_memory_context()
+            except Exception:
+                memory_ctx = {"candidates": [], "confirmed_object": None}
+            self._publish_llm_event(
+                "call_start",
+                {
+                    "state_summary": self._truncate_text(self.state_to_text(self.current_state), limit=500),
+                    "candidates": memory_ctx.get("candidates", []),
+                    "confirmed_object": memory_ctx.get("confirmed_object"),
+                },
+            )
             
             # Call LLM
             rospy.loginfo("Calling LLM for decision...")
@@ -359,12 +404,23 @@ Based on this information, decide your next action. Output ONLY valid JSON."""
             call = self.parse_tool_call(response)
             if not call:
                 rospy.logerr("Failed to parse tool call")
+                self._publish_llm_event("parse_tool_call_failed", {"response": response})
                 return None
             
             # Validate
             is_valid, error = self.validate_tool_call(call)
             if not is_valid:
                 rospy.logwarn(f"Invalid tool call: {error}")
+                self._publish_llm_event(
+                    "invalid_tool_call",
+                    {
+                        "error": error,
+                        "tool_name": call.tool_name,
+                        "target_object_id": call.target_object_id,
+                        "confirmed_object": self.memory.confirmed_object,
+                        "candidates": list(self.memory.candidate_ids),
+                    },
+                )
                 # LLM made invalid call - could retry or return error
                 # For now, generate a fallback INTERACT
                 call = self._make_fallback_interact(error)
@@ -372,6 +428,15 @@ Based on this information, decide your next action. Output ONLY valid JSON."""
             # Publish
             if self.tool_pub:
                 self.tool_pub.publish(call)
+            self._publish_llm_event(
+                "tool_call_published",
+                {
+                    "call_id": call.call_id,
+                    "tool_name": call.tool_name,
+                    "target_object_id": call.target_object_id,
+                    "interact_type": int(call.interact_type) if call.tool_name == "INTERACT" else None,
+                },
+            )
             
             # If INTERACT, also publish as query
             if call.tool_name == 'INTERACT' and self.query_pub:
@@ -397,6 +462,13 @@ Based on this information, decide your next action. Output ONLY valid JSON."""
         call.interact_options = ["Pick up object", "Release object", "Cancel"]
         call.reasoning = f"Fallback due to invalid call: {error}"
         call.call_id = f"call_{rospy.Time.now().to_nsec()}"
+        self._publish_llm_event(
+            "fallback_interact",
+            {
+                "error": error,
+                "call_id": call.call_id,
+            },
+        )
         return call
     
     def handle_user_response(self, query_id: str, selected_indices: list, response_text: str):

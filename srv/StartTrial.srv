@@ -1,0 +1,6 @@
+string mode
+string subject_id
+string reason
+---
+bool success
+string message

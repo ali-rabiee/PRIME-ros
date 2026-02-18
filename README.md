@@ -6,12 +6,12 @@ An LLM-based shared autonomy system for robotic manipulation with minimal user i
 
 ## Overview
 
-PRIME enables fluent human–robot collaboration using only symbolic observations and minimal user interaction. The system:
+PRIME enables fluent human–robot collaboration using symbolic observations and minimal user interaction. The system:
 
 1. **Observes** the workspace through YOLO object detection and Kinova arm state
-2. **Reasons** over symbolic state using an LLM (Qwen 2.5) to infer user intent
+2. **Reasons** over symbolic state (optionally using an LLM) to infer user intent
 3. **Interacts** with users through discrete choices (yes/no, multiple choice)
-4. **Acts** autonomously when confidence is high, executing grasping primitives
+4. **Acts** via tool primitives: APPROACH, ALIGN_YAW, GRASP, RELEASE (MoveIt + Kinova driver)
 
 ## Architecture
 
@@ -19,192 +19,240 @@ PRIME enables fluent human–robot collaboration using only symbolic observation
 ┌─────────────────────────────────────────────────────────────┐
 │                      PRIME System                           │
 ├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐     │
-│  │   YOLO-ROS   │──▶│State Builder │──▶│ LLM Executive│     │
-│  │  (existing)  │   │  (symbolic)  │   │  (Qwen 2.5)  │     │
-│  └──────────────┘   └──────────────┘   └──────┬───────┘     │
-│                                               │             │
-│  ┌──────────────┐   ┌──────────────┐          │             │
-│  │ GUI Teleop   │──▶│   Memory     │◀─────────┤             │
-│  │ (mode+cmd)   │   │   Module     │          │             │
-│  └──────────────┘   └──────────────┘          ▼             │
-│                                        ┌──────────────┐     │
-│  ┌──────────────┐                      │Tool Executor │     │
-│  │ User         │◀──────────────────── │  (MoveIt)    │     │
-│  │ Interface    │                      └──────────────┘     │
-│  └──────────────┘                                           │
-│                                                             │
+│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐    │
+│  │   YOLO-ROS   │──▶│State Builder │──▶│ LLM Executive│    │
+│  │  (detection) │   │  (symbolic)   │   │  (optional)  │    │
+│  └──────────────┘   └──────────────┘   └──────┬───────┘    │
+│                                                │            │
+│  ┌──────────────┐   ┌──────────────┐           │            │
+│  │ GUI Teleop   │──▶│   Memory     │◀──────────┤            │
+│  │ (mode+cmd)   │   │   Module     │           │            │
+│  └──────────────┘   └──────────────┘           ▼            │
+│                                         ┌──────────────┐    │
+│  ┌──────────────┐   ┌──────────────┐   │Tool Executor │    │
+│  │ User         │◀──│ Trial Logger │   │  (MoveIt)    │    │
+│  │ Interface    │   │ (start/stop)  │   └──────────────┘    │
+│  └──────────────┘   └──────────────┘                       │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+## Package structure
+
+| Path | Description |
+|------|-------------|
+| `launch/` | `prime_full.launch` (robot + camera + YOLO + MoveIt + PRIME), `prime.launch` (PRIME only) |
+| `scripts/` | Nodes: `prime_node.py`, `state_builder.py`, `tool_executor.py`, `gui_teleop.py`, `user_interface.py`, `llm_executive.py`, `go_home.py`, `trial_logger.py`, `start_trial.py`, `reset_trial.py` |
+| `config/` | `prime_params.yaml`, `llm_prompts.yaml` |
+| `srv/` | `StartTrial.srv` (mode, subject_id, reason → success, message) |
+| `msg/` | PRIME messages (ToolCall, ToolResult, SymbolicState, etc.) |
 
 ## Prerequisites
 
 - ROS Noetic
-- Kinova ROS packages (`kinova-ros`)
-- RealSense ROS packages (`realsense-ros`)
-- YOLO ROS package (`yolo-ros`)
-- MoveIt
-- Ollama with Qwen 2.5 model (or compatible LLM server)
+- Kinova ROS packages (`kinova-ros`, `kinova_bringup`)
+- RealSense ROS (`realsense2_camera`)
+- YOLO ROS (`yolo-ros`)
+- MoveIt (e.g. `j2n6s300_moveit_config` for Jaco2)
+- Optional: Ollama with Qwen 2.5 (or compatible LLM) for `llm_executive`
 
 ## Installation
 
-1. Clone into your catkin workspace:
-```bash
-cd ~/catkin_ws/src
-# Already in PRIME-ros directory
-```
+1. Clone or place the package in your catkin workspace:
+   ```bash
+   cd ~/catkin_ws/src
+   # package lives at src/PRIME-ros (prime_ros)
+   ```
 
-2. Install Python dependencies:
-```bash
-pip install -r requirements.txt
-```
+2. Install Python dependencies (if any):
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-3. Build the package:
-```bash
-cd ~/catkin_ws
-catkin build prime_ros
-source devel/setup.bash
-```
+3. Build:
+   ```bash
+   cd ~/catkin_ws
+   catkin_make
+   # or: catkin build prime_ros
+   source devel/setup.bash
+   ```
 
-4. Start Ollama with Qwen 2.5:
-```bash
-ollama run qwen2.5
-```
+4. Optional — for LLM-driven decisions, start Ollama:
+   ```bash
+   ollama run qwen2.5
+   ```
 
 ## Usage
 
-### Full System Launch
+### Full stack (robot + camera + YOLO + MoveIt + PRIME)
 
-Launch everything (robot, camera, YOLO, MoveIt, PRIME):
 ```bash
 roslaunch prime_ros prime_full.launch robot_type:=j2n6s300
 ```
 
-### PRIME Only Launch
+Launch arguments (examples):
+- `robot_type:=j2n6s300`
+- `yolo_model:=yolo26` or `yolov8`
+- `color_width`, `color_height`, `color_fps` (RealSense)
 
-If robot and perception are already running:
+### PRIME only (robot and perception already running)
+
 ```bash
 roslaunch prime_ros prime.launch robot_type:=j2n6s300
 ```
 
-### Configuration
+Launch arguments for `prime.launch`:
+- `robot_type`, `auto_home`, `home_target`, `home_delay`
+- `enable_gui_teleop`, `enable_trial_logger`
+- `trial_log_root` (default: `$(env HOME)/Desktop/PRIME_LOGS`)
+- `trial_image_topic`, `trial_video_fps`, `trial_success_label`
+- `start_llm`, `llm_endpoint`
 
-Edit `config/prime_params.yaml` for:
-- Workspace bounds (3x3 grid discretization)
-- LLM endpoint and model settings
-- Tool execution parameters
-- GUI teleop speeds/publish rate
+## Configuration
 
-## ROS Topics
+Main config: `config/prime_params.yaml`.
+
+| Section | Purpose |
+|--------|---------|
+| `workspace` | 3×3 grid bounds (`x_min`/`x_max`, `y_min`/`y_max`), `object_z`, `axis_signs` |
+| `safety_bounds` | Motion limits; `add_moveit_walls` for planning scene |
+| `state_builder` | Tracking, YOLO filtering, mask yaw, publish rates |
+| `tools/approach` | `pre_grasp_distance`, `approach_speed`; pixel_servo options |
+| `tools/align` | `velocity_scaling`, `acceleration_scaling` (ALIGN_YAW speed), `wrist_limit`, `down_pitch_deg` |
+| `tools/grasp` | Finger positions (open/close) |
+| `teleop_gui` | `publish_rate`, `linear_speed`, `angular_speed` |
+| `llm` | `endpoint`, `model`, `temperature`, `timeout` |
+
+Tuning rotation speed: increase `tools/align/velocity_scaling` and `acceleration_scaling` (e.g. 1.0–1.2). Lower values (e.g. 0.4) reduce joint-limit warnings.
+
+## Trial logging
+
+The trial logger records GUI events, tool calls/results, queries/responses, and optional camera video **per trial**. It does **not** start a trial at launch — you start and stop explicitly.
+
+### Log layout
+
+- **Root:** `~/Desktop/PRIME_LOGS` (overridable via `trial_log_root` in `prime.launch`).
+- **Per run:** When you start a trial with mode and subject, logs go under:
+  `PRIME_LOGS/<mode>/<subject_id>/trial_<timestamp>/`
+- If mode/subject are omitted in the start call, logs go under `PRIME_LOGS/trial_<timestamp>/`.
+
+Each trial folder contains:
+- `events.jsonl` — all events
+- `gui_events.jsonl`, `tool_calls.jsonl`, `tool_results.jsonl`, `queries.jsonl`, `responses.jsonl`, `llm_events.jsonl`
+- `trial_meta.json`, `trial_summary.json`
+- `camera.mp4` (if recording enabled), `video_meta.json`
+
+### Start / stop trial
+
+**Start** (logging and video begin here):
+
+```bash
+rosrun prime_ros start_trial.py <mode> <subject_id>
+# e.g.
+rosrun prime_ros start_trial.py manual s1
+rosrun prime_ros start_trial.py assistive s2 --reason participant_ready
+```
+
+Or call the service directly:
+
+```bash
+rosservice call /prime/trial_logger/start "{mode: 'manual', subject_id: 's1', reason: 'trial_start'}"
+```
+
+**Stop** (writes summary and closes files):
+
+```bash
+rosservice call /prime/trial_logger/stop
+```
+
+Do **not** rely on terminating `roslaunch` to stop cleanly; use the stop service so files are finalized.
+
+### Reset trial (stop + home + start)
+
+Stop current trial, home the arm, then start a new trial with optional mode/subject:
+
+```bash
+rosrun prime_ros reset_trial.py _mode:=manual _sub:=s1
+```
+
+Mode and subject for the *new* trial come from private params `_mode` and `_sub` (or `_subject_id`).
+
+### Success label (optional)
+
+To mark success for a specific object label in trial summaries, set at launch:
+
+```bash
+roslaunch prime_ros prime.launch trial_success_label:=cup
+```
+
+## ROS services
+
+| Service | Type | Description |
+|--------|------|-------------|
+| `/prime/trial_logger/start` | `prime_ros/StartTrial` | Start a new trial (args: `mode`, `subject_id`, `reason`) |
+| `/prime/trial_logger/stop` | `std_srvs/Trigger` | End current trial and write summary |
+| `/prime/trial_logger/reset` | `std_srvs/Trigger` | End current trial and start a new one (same mode/subject as last start) |
+
+## ROS topics
 
 ### Published
-- `/prime/symbolic_state` - Current symbolic state representation
-- `/prime/candidate_objects` - Candidate target objects
-- `/prime/control_mode` - GUI-selected control mode and active-command flag
-- `/prime/gui_teleop_event` - GUI action logs as JSON strings
-- `/prime/query` - Queries to user (questions/confirmations)
-- `/prime/tool_call` - Tool calls from LLM
-- `/prime/tool_result` - Tool execution results
+
+- `/prime/symbolic_state` — symbolic state (grid, objects, gripper)
+- `/prime/candidate_objects` — candidate targets
+- `/prime/control_mode` — GUI control mode and active-command flag
+- `/prime/gui_teleop_event` — GUI action logs (JSON)
+- `/prime/query` — queries to user
+- `/prime/tool_call` — tool calls (from LLM or executive)
+- `/prime/tool_result` — tool execution results
 
 ### Subscribed
-- `/prime/response` - User responses to queries
-- `/{robot}_driver/out/tool_pose` - Gripper pose
-- `/{robot}_driver/out/joint_state` - Joint states
-- `/yolo/image_with_bboxes` - YOLO detections
+
+- `/prime/response` — user responses to queries
+- `/<robot>_driver/out/tool_pose`, `/<robot>_driver/out/joint_state`
+- `/yolo/...` (detections); camera topic set via `trial_image_topic` for logger
 
 ## Tools
-
-The LLM can invoke these tools:
 
 | Tool | Description |
 |------|-------------|
 | `INTERACT` | Ask user a question/confirmation |
-| `APPROACH(obj)` | Move gripper toward object |
-| `ALIGN_YAW(obj)` | Align gripper orientation |
-| `GRASP` | Close gripper |
-| `RELEASE` | Open gripper |
+| `APPROACH(obj)` | Move gripper toward object (MoveIt) |
+| `ALIGN_YAW(obj)` | Align gripper yaw to object (MoveIt; speed via `tools/align` config) |
+| `GRASP` | Close gripper (Kinova) |
+| `RELEASE` | Open gripper (Kinova) |
 
-## User Input
+## User input
 
-Teleoperation and responses are split:
+1. **GUI Teleop (`gui_teleop.py`)**  
+   Modes: Translation, Rotation, Gripper. Axis buttons publish Cartesian velocity; STOP zeroes it; Open/Close send finger goals. Publishes `/prime/control_mode` and `/prime/gui_teleop_event`.
 
-1. **GUI Teleop (`gui_teleop.py`)**
-   - Modes: `Translation`, `Rotation`, `Gripper`
-   - Press-and-hold axis buttons publish cartesian velocity on one axis only
-   - `STOP` immediately zeroes velocity
-   - `Open/Close` send finger action goals
-   - Publishes `/prime/control_mode` and `/prime/gui_teleop_event`
+2. **Keyboard query responses (`user_interface.py`)**  
+   `y`/`1` = Yes/Option 1, `n`/`2` = No/Option 2, `3`–`5` = Options 3–5, `q` = Cancel.
 
-2. **Keyboard Query Responses (`user_interface.py`)**
-   - `y` / `1` = Yes / Option 1
-   - `n` / `2` = No / Option 2
-   - `3-5` = Options 3-5
-   - `q` = Cancel query
+## Symbolic state
+
+Workspace is a 3×3 grid; objects and gripper are tracked by grid cell for efficient reasoning.
+
+## Memory
+
+PRIME maintains: dialog history, candidate set, and tool history for multi-step behavior.
 
 ## Testing
-
-### Automated Test
-
-```bash
-cd ~/catkin_ws
-catkin build prime_ros
-catkin run_tests prime_ros
-catkin_test_results build/prime_ros
-```
-
-Unit coverage is in `test/test_teleop_command_model.py` for:
-- Translation/rotation axis-isolated velocity mapping
-- Stop-to-zero behavior
-- Control mode flags and `joystick_active` semantics
-- GUI event JSON payload fields
-
-### Manual Teleop Smoke Test
 
 ```bash
 cd ~/catkin_ws
 source devel/setup.bash
-roslaunch prime_ros prime.launch
+catkin_make
+catkin run_tests prime_ros
+# or: catkin_test_results build/prime_ros
 ```
 
-In separate terminals:
+Unit tests: `test/test_teleop_command_model.py` (teleop command model, mode/axis behavior).
 
-```bash
-rostopic echo /prime/control_mode
-rostopic echo /prime/gui_teleop_event
-rostopic echo /<robot_type>_driver/in/cartesian_velocity
-```
+Manual smoke test: launch `prime.launch`, then inspect `/prime/control_mode`, `/prime/gui_teleop_event`, and `/<robot>_driver/in/cartesian_velocity` while using the GUI.
 
-Validation steps:
-1. Switch modes in the GUI and confirm `/prime/control_mode.mode` changes and motion is stopped.
-2. Press/hold `+X` in Translation mode and confirm only `twist_linear_x` is non-zero.
-3. Release the button and confirm velocity returns to all zeros immediately.
-4. Press/hold `-Rz` in Rotation mode and confirm only `twist_angular_z` is non-zero and negative.
-5. Click `Open`/`Close` in Gripper mode and confirm `/prime/gui_teleop_event` emits `type:\"gripper\"` entries.
+## Paper reference
 
-## Symbolic State
-
-The workspace is discretized into a 3x3 grid:
-```
-[0, 1, 2]
-[3, 4, 5]
-[6, 7, 8]
-```
-
-Objects and gripper positions are tracked by grid cell, enabling efficient LLM reasoning.
-
-## Memory System
-
-PRIME maintains structured memory for multi-step reasoning:
-- **Dialog history**: Past interactions and user responses
-- **Candidate set**: Plausible target objects
-- **Tool history**: Recent actions and outcomes
-
-## Paper Reference
-
-This implementation is based on:
-
-> PRIME: An LLM-Based Executive for Interactive Manipulation Planning with Minimal User Effort
+> PRIME: An LLM-Based Executive for Interactive Manipulation Planning with Minimal User Effort  
 > Ali Rabiee et al., IROS 2026
 
 ## License

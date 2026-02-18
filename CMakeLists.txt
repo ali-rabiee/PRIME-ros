@@ -8,6 +8,8 @@ find_package(catkin REQUIRED COMPONENTS
   geometry_msgs
   sensor_msgs
   kinova_msgs
+  std_srvs
+  cv_bridge
   message_generation
   actionlib
   actionlib_msgs
@@ -31,6 +33,7 @@ add_service_files(
   FILES
   GetSymbolicState.srv
   ExecuteTool.srv
+  StartTrial.srv
 )
 
 # Generate actions
@@ -55,6 +58,8 @@ catkin_package(
     geometry_msgs 
     sensor_msgs 
     kinova_msgs 
+    std_srvs
+    cv_bridge
     message_runtime
     actionlib
     actionlib_msgs
@@ -75,6 +80,9 @@ catkin_install_python(PROGRAMS
   scripts/gui_teleop.py
   scripts/go_home.py
   scripts/print_home_state.py
+  scripts/trial_logger.py
+  scripts/start_trial.py
+  scripts/reset_trial.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
