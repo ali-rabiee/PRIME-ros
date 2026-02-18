@@ -101,7 +101,10 @@ Edit `config/prime_params.yaml` for:
 PRIME now includes a trial logger that records GUI events, tool calls/results,
 query/response interactions, and the camera feed per trial.
 
-- Logs are saved under `~/Desktop/PRIME_LOGS/trial_*`
+- Trial logger starts idle (no active trial) after launch.
+- Logs are saved under `~/Desktop/PRIME_LOGS/<mode>/<sub>/trial_*` when those
+  values are provided to the start service. If omitted, logs are saved under
+  `~/Desktop/PRIME_LOGS/trial_*`.
 - Each trial folder includes:
   - `events.jsonl` (all events)
   - `gui_events.jsonl`, `tool_calls.jsonl`, `tool_results.jsonl`
@@ -119,6 +122,31 @@ If you want to log success for a specific object label, pass:
 
 ```bash
 roslaunch prime_ros prime.launch trial_success_label:=cup
+```
+
+To start trial logging with study mode and subject:
+
+```bash
+rosservice call /prime/trial_logger/start "{mode: 'manual', subject_id: 's1', reason: 'trial_start'}"
+```
+
+Shortcut command:
+
+```bash
+rosrun prime_ros start_trial.py manual s1
+```
+
+Warmup-first workflow:
+
+```bash
+# Launch stack (logger stays idle)
+roslaunch prime_ros prime_full.launch
+
+# When ready, start trial (logging + video begin now)
+rosrun prime_ros start_trial.py manual s1 --reason participant_ready
+
+# Stop trial (writes summary and closes files)
+rosservice call /prime/trial_logger/stop
 ```
 
 ## ROS Topics

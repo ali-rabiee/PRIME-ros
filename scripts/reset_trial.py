@@ -5,13 +5,14 @@ Reset current trial and return the robot to its home position.
 Sequence:
 1) Stop current trial logging (/prime/trial_logger/stop)
 2) Home the robot (Kinova driver home_arm by default; MoveIt via go_home.py if ~home_method:=moveit)
-3) Start new trial logging (/prime/trial_logger/start)
+3) Start new trial logging (/prime/trial_logger/start) with mode/subject_id
 """
 
 import subprocess
 
 import rospy
 from std_srvs.srv import Trigger
+from prime_ros.srv import StartTrial
 
 try:
     from kinova_msgs.srv import HomeArm
@@ -30,6 +31,21 @@ def _call_trigger(service_name, timeout=5.0):
     try:
         srv = rospy.ServiceProxy(service_name, Trigger)
         resp = srv()
+        return bool(resp.success), str(resp.message)
+    except Exception as exc:
+        rospy.logwarn("reset_trial: failed calling %s: %s", service_name, exc)
+        return False, str(exc)
+
+
+def _call_start_trial(service_name, mode="", subject_id="", reason="service_start", timeout=10.0):
+    try:
+        rospy.wait_for_service(service_name, timeout=timeout)
+    except Exception as exc:
+        rospy.logwarn("reset_trial: service %s not available: %s", service_name, exc)
+        return False, str(exc)
+    try:
+        srv = rospy.ServiceProxy(service_name, StartTrial)
+        resp = srv(mode=str(mode), subject_id=str(subject_id), reason=str(reason))
         return bool(resp.success), str(resp.message)
     except Exception as exc:
         rospy.logwarn("reset_trial: failed calling %s: %s", service_name, exc)
@@ -83,6 +99,8 @@ def main():
     )
     home_service = str(rospy.get_param("~home_service", f"/{robot_type}_driver/in/home_arm"))
     home_method = str(rospy.get_param("~home_method", "driver")).strip().lower()
+    mode = str(rospy.get_param("~mode", "")).strip()
+    subject_id = str(rospy.get_param("~sub", rospy.get_param("~subject_id", ""))).strip()
 
     extra_args = []
     if rospy.has_param("~velocity_scaling"):
@@ -115,7 +133,13 @@ def main():
         if ret != 0:
             rospy.logerr("reset_trial: go_home failed with exit code %s", ret)
 
-    ok, msg = _call_trigger(start_service, timeout=10.0)
+    ok, msg = _call_start_trial(
+        start_service,
+        mode=mode,
+        subject_id=subject_id,
+        reason="reset_trial",
+        timeout=10.0,
+    )
     if ok:
         rospy.loginfo("reset_trial: started new trial (%s)", msg)
     else:

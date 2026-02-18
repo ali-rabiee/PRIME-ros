@@ -16,6 +16,7 @@ import rospy
 from std_msgs.msg import String
 from sensor_msgs.msg import Image
 from std_srvs.srv import Trigger, TriggerResponse
+from prime_ros.srv import StartTrial, StartTrialResponse
 
 try:
     from cv_bridge import CvBridge, CvBridgeError
@@ -41,6 +42,9 @@ class TrialLogger:
         self.log_root = str(
             rospy.get_param("~log_root", os.path.expanduser("~/Desktop/PRIME_LOGS"))
         )
+        self.mode = ""
+        self.subject_id = ""
+        self.current_log_root = self.log_root
         self.image_topic = str(rospy.get_param("~image_topic", "/camera/color/image_raw"))
         self.record_video = bool(rospy.get_param("~record_video", True))
         self.video_fps = float(rospy.get_param("~video_fps", 30.0))
@@ -94,7 +98,6 @@ class TrialLogger:
         self.last_candidates_snapshot = None
 
         self._ensure_root()
-        self._start_trial(reason="startup")
 
         self.gui_sub = rospy.Subscriber("/prime/gui_teleop_event", String, self._on_gui_event, queue_size=200)
         self.image_sub = rospy.Subscriber(self.image_topic, Image, self._on_image, queue_size=1)
@@ -110,12 +113,16 @@ class TrialLogger:
         else:
             rospy.logwarn("trial_logger: PRIME messages unavailable; tool/query logging disabled.")
 
-        self.start_srv = rospy.Service("/prime/trial_logger/start", Trigger, self._handle_start)
+        self.start_srv = rospy.Service("/prime/trial_logger/start", StartTrial, self._handle_start)
         self.stop_srv = rospy.Service("/prime/trial_logger/stop", Trigger, self._handle_stop)
         self.reset_srv = rospy.Service("/prime/trial_logger/reset", Trigger, self._handle_reset)
 
         rospy.on_shutdown(self._on_shutdown)
-        rospy.loginfo("trial_logger: started (log_root=%s, image_topic=%s)", self.log_root, self.image_topic)
+        rospy.loginfo(
+            "trial_logger: started (log_root=%s, image_topic=%s). Waiting for /prime/trial_logger/start.",
+            self.log_root,
+            self.image_topic,
+        )
 
     def _ensure_root(self):
         try:
@@ -134,12 +141,12 @@ class TrialLogger:
             return ""
         return datetime.datetime.fromtimestamp(float(ts)).isoformat(timespec="milliseconds")
 
-    def _next_trial_id(self):
+    def _next_trial_id(self, root_dir):
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         base = f"trial_{stamp}"
         trial_id = base
         idx = 1
-        while os.path.exists(os.path.join(self.log_root, trial_id)):
+        while os.path.exists(os.path.join(root_dir, trial_id)):
             idx += 1
             trial_id = f"{base}_{idx:02d}"
         return trial_id
@@ -169,12 +176,29 @@ class TrialLogger:
         self.response_fp = None
         self.llm_fp = None
 
-    def _start_trial(self, reason="manual"):
+    def _resolve_trial_root(self, mode="", subject_id=""):
+        mode = str(mode).strip()
+        subject_id = str(subject_id).strip()
+        root = self.log_root
+        if mode:
+            root = os.path.join(root, mode)
+        if subject_id:
+            root = os.path.join(root, subject_id)
+        return root, mode, subject_id
+
+    def _start_trial(self, reason="manual", mode="", subject_id=""):
         with self.lock:
             if self.trial_active:
                 return False, "trial already active"
-            self.trial_id = self._next_trial_id()
-            self.trial_dir = os.path.join(self.log_root, self.trial_id)
+
+            root_dir, mode, subject_id = self._resolve_trial_root(mode=mode, subject_id=subject_id)
+            os.makedirs(root_dir, exist_ok=True)
+            self.current_log_root = root_dir
+            self.mode = mode
+            self.subject_id = subject_id
+
+            self.trial_id = self._next_trial_id(root_dir)
+            self.trial_dir = os.path.join(root_dir, self.trial_id)
             os.makedirs(self.trial_dir, exist_ok=True)
             self.trial_token += 1
 
@@ -207,6 +231,9 @@ class TrialLogger:
 
             meta = {
                 "trial_id": self.trial_id,
+                "mode": self.mode,
+                "subject_id": self.subject_id,
+                "log_root": self.current_log_root,
                 "start_time": self._iso(self.trial_start_wall),
                 "start_time_epoch": self.trial_start_wall,
                 "image_topic": self.image_topic,
@@ -253,6 +280,9 @@ class TrialLogger:
 
             summary = {
                 "trial_id": self.trial_id,
+                "mode": self.mode,
+                "subject_id": self.subject_id,
+                "log_root": self.current_log_root,
                 "trial_dir": self.trial_dir,
                 "start_time": self._iso(self.trial_start_wall),
                 "end_time": self._iso(self.trial_end_wall),
@@ -587,9 +617,10 @@ class TrialLogger:
             if self.video_writer is not None:
                 self.video_writer.write(cv_image)
 
-    def _handle_start(self, _req):
-        ok, msg = self._start_trial(reason="service_start")
-        return TriggerResponse(success=ok, message=msg)
+    def _handle_start(self, req):
+        reason = str(req.reason).strip() if req and req.reason else "service_start"
+        ok, msg = self._start_trial(reason=reason, mode=req.mode, subject_id=req.subject_id)
+        return StartTrialResponse(success=ok, message=msg)
 
     def _handle_stop(self, _req):
         ok, msg = self._finish_trial(reason="service_stop")
@@ -598,7 +629,7 @@ class TrialLogger:
     def _handle_reset(self, _req):
         ok, msg = self._finish_trial(reason="service_reset")
         if ok:
-            ok2, msg2 = self._start_trial(reason="service_reset")
+            ok2, msg2 = self._start_trial(reason="service_reset", mode=self.mode, subject_id=self.subject_id)
             return TriggerResponse(success=ok2, message=msg2)
         return TriggerResponse(success=False, message=msg)
 

@@ -33,6 +33,7 @@ add_service_files(
   FILES
   GetSymbolicState.srv
   ExecuteTool.srv
+  StartTrial.srv
 )
 
 # Generate actions
@@ -80,6 +81,7 @@ catkin_install_python(PROGRAMS
   scripts/go_home.py
   scripts/print_home_state.py
   scripts/trial_logger.py
+  scripts/start_trial.py
   scripts/reset_trial.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
