@@ -9,6 +9,11 @@
   <arg name="home_target" default="Home"/>
   <arg name="home_delay" default="3.0"/>
   <arg name="enable_gui_teleop" default="true"/>
+  <arg name="enable_trial_logger" default="true"/>
+  <arg name="trial_log_root" default="$(env HOME)/Desktop/PRIME_LOGS"/>
+  <arg name="trial_image_topic" default="/camera/color/image_raw"/>
+  <arg name="trial_video_fps" default="30.0"/>
+  <arg name="trial_success_label" default=""/>
   
   <!-- Load parameters -->
   <rosparam file="$(find prime_ros)/config/prime_params.yaml" command="load"/>
@@ -61,6 +66,15 @@
   <!-- User Interface Node -->
   <!-- Handles user queries and responses -->
   <node pkg="prime_ros" type="user_interface.py" name="user_interface" output="screen"/>
+
+  <!-- Trial Logger Node -->
+  <!-- Records GUI/tool interactions and camera video per trial -->
+  <node if="$(arg enable_trial_logger)" pkg="prime_ros" type="trial_logger.py" name="trial_logger" output="screen">
+    <param name="log_root" value="$(arg trial_log_root)"/>
+    <param name="image_topic" value="$(arg trial_image_topic)"/>
+    <param name="video_fps" value="$(arg trial_video_fps)"/>
+    <param name="success_label" value="$(arg trial_success_label)"/>
+  </node>
   
   <!-- Main PRIME Node -->
   <!-- Coordinates all components -->
