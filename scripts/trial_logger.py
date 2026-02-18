@@ -44,6 +44,7 @@ class TrialLogger:
         )
         self.mode = ""
         self.subject_id = ""
+        self.difficulty = ""
         self.current_log_root = self.log_root
         self.image_topic = str(rospy.get_param("~image_topic", "/camera/color/image_raw"))
         self.record_video = bool(rospy.get_param("~record_video", True))
@@ -176,26 +177,32 @@ class TrialLogger:
         self.response_fp = None
         self.llm_fp = None
 
-    def _resolve_trial_root(self, mode="", subject_id=""):
+    def _resolve_trial_root(self, mode="", subject_id="", difficulty=""):
         mode = str(mode).strip()
         subject_id = str(subject_id).strip()
+        difficulty = str(difficulty).strip()
         root = self.log_root
         if mode:
             root = os.path.join(root, mode)
         if subject_id:
             root = os.path.join(root, subject_id)
-        return root, mode, subject_id
+        if difficulty:
+            root = os.path.join(root, difficulty)
+        return root, mode, subject_id, difficulty
 
-    def _start_trial(self, reason="manual", mode="", subject_id=""):
+    def _start_trial(self, reason="manual", mode="", subject_id="", difficulty=""):
         with self.lock:
             if self.trial_active:
                 return False, "trial already active"
 
-            root_dir, mode, subject_id = self._resolve_trial_root(mode=mode, subject_id=subject_id)
+            root_dir, mode, subject_id, difficulty = self._resolve_trial_root(
+                mode=mode, subject_id=subject_id, difficulty=difficulty
+            )
             os.makedirs(root_dir, exist_ok=True)
             self.current_log_root = root_dir
             self.mode = mode
             self.subject_id = subject_id
+            self.difficulty = difficulty
 
             self.trial_id = self._next_trial_id(root_dir)
             self.trial_dir = os.path.join(root_dir, self.trial_id)
@@ -233,6 +240,7 @@ class TrialLogger:
                 "trial_id": self.trial_id,
                 "mode": self.mode,
                 "subject_id": self.subject_id,
+                "difficulty": self.difficulty,
                 "log_root": self.current_log_root,
                 "start_time": self._iso(self.trial_start_wall),
                 "start_time_epoch": self.trial_start_wall,
@@ -282,6 +290,7 @@ class TrialLogger:
                 "trial_id": self.trial_id,
                 "mode": self.mode,
                 "subject_id": self.subject_id,
+                "difficulty": self.difficulty,
                 "log_root": self.current_log_root,
                 "trial_dir": self.trial_dir,
                 "start_time": self._iso(self.trial_start_wall),
@@ -619,7 +628,12 @@ class TrialLogger:
 
     def _handle_start(self, req):
         reason = str(req.reason).strip() if req and req.reason else "service_start"
-        ok, msg = self._start_trial(reason=reason, mode=req.mode, subject_id=req.subject_id)
+        ok, msg = self._start_trial(
+            reason=reason,
+            mode=req.mode,
+            subject_id=req.subject_id,
+            difficulty=req.difficulty,
+        )
         return StartTrialResponse(success=ok, message=msg)
 
     def _handle_stop(self, _req):
@@ -629,7 +643,12 @@ class TrialLogger:
     def _handle_reset(self, _req):
         ok, msg = self._finish_trial(reason="service_reset")
         if ok:
-            ok2, msg2 = self._start_trial(reason="service_reset", mode=self.mode, subject_id=self.subject_id)
+            ok2, msg2 = self._start_trial(
+                reason="service_reset",
+                mode=self.mode,
+                subject_id=self.subject_id,
+                difficulty=self.difficulty,
+            )
             return TriggerResponse(success=ok2, message=msg2)
         return TriggerResponse(success=False, message=msg)
 

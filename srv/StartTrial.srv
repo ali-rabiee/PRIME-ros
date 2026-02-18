@@ -1,5 +1,6 @@
 string mode
 string subject_id
+string difficulty
 string reason
 ---
 bool success

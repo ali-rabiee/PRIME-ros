@@ -5,7 +5,7 @@ Reset current trial and return the robot to its home position.
 Sequence:
 1) Stop current trial logging (/prime/trial_logger/stop)
 2) Home the robot (Kinova driver home_arm by default; MoveIt via go_home.py if ~home_method:=moveit)
-3) Start new trial logging (/prime/trial_logger/start) with mode/subject_id
+3) Start new trial logging (/prime/trial_logger/start) with mode/subject_id/difficulty
 """
 
 import subprocess
@@ -37,7 +37,7 @@ def _call_trigger(service_name, timeout=5.0):
         return False, str(exc)
 
 
-def _call_start_trial(service_name, mode="", subject_id="", reason="service_start", timeout=10.0):
+def _call_start_trial(service_name, mode="", subject_id="", difficulty="", reason="service_start", timeout=10.0):
     try:
         rospy.wait_for_service(service_name, timeout=timeout)
     except Exception as exc:
@@ -45,7 +45,12 @@ def _call_start_trial(service_name, mode="", subject_id="", reason="service_star
         return False, str(exc)
     try:
         srv = rospy.ServiceProxy(service_name, StartTrial)
-        resp = srv(mode=str(mode), subject_id=str(subject_id), reason=str(reason))
+        resp = srv(
+            mode=str(mode),
+            subject_id=str(subject_id),
+            difficulty=str(difficulty),
+            reason=str(reason),
+        )
         return bool(resp.success), str(resp.message)
     except Exception as exc:
         rospy.logwarn("reset_trial: failed calling %s: %s", service_name, exc)
@@ -101,6 +106,7 @@ def main():
     home_method = str(rospy.get_param("~home_method", "driver")).strip().lower()
     mode = str(rospy.get_param("~mode", "")).strip()
     subject_id = str(rospy.get_param("~sub", rospy.get_param("~subject_id", ""))).strip()
+    difficulty = str(rospy.get_param("~difficulty", rospy.get_param("~task_difficulty", ""))).strip()
 
     extra_args = []
     if rospy.has_param("~velocity_scaling"):
@@ -137,6 +143,7 @@ def main():
         start_service,
         mode=mode,
         subject_id=subject_id,
+        difficulty=difficulty,
         reason="reset_trial",
         timeout=10.0,
     )

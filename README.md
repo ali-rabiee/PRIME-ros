@@ -43,7 +43,7 @@ PRIME enables fluent human–robot collaboration using symbolic observations and
 | `launch/` | `prime_full.launch` (robot + camera + YOLO + MoveIt + PRIME), `prime.launch` (PRIME only) |
 | `scripts/` | Nodes: `prime_node.py`, `state_builder.py`, `tool_executor.py`, `gui_teleop.py`, `user_interface.py`, `llm_executive.py`, `go_home.py`, `trial_logger.py`, `start_trial.py`, `reset_trial.py` |
 | `config/` | `prime_params.yaml`, `llm_prompts.yaml` |
-| `srv/` | `StartTrial.srv` (mode, subject_id, reason → success, message) |
+| `srv/` | `StartTrial.srv` (mode, subject_id, difficulty, reason → success, message) |
 | `msg/` | PRIME messages (ToolCall, ToolResult, SymbolicState, etc.) |
 
 ## Prerequisites
@@ -131,9 +131,9 @@ The trial logger records GUI events, tool calls/results, queries/responses, and 
 ### Log layout
 
 - **Root:** `~/Desktop/PRIME_LOGS` (overridable via `trial_log_root` in `prime.launch`).
-- **Per run:** When you start a trial with mode and subject, logs go under:
-  `PRIME_LOGS/<mode>/<subject_id>/trial_<timestamp>/`
-- If mode/subject are omitted in the start call, logs go under `PRIME_LOGS/trial_<timestamp>/`.
+- **Per run:** When you start a trial with mode, subject, and difficulty, logs go under:
+  `PRIME_LOGS/<mode>/<subject_id>/<difficulty>/trial_<timestamp>/`
+- If fields are omitted in the start call, missing path levels are skipped.
 
 Each trial folder contains:
 - `events.jsonl` — all events
@@ -146,16 +146,16 @@ Each trial folder contains:
 **Start** (logging and video begin here):
 
 ```bash
-rosrun prime_ros start_trial.py <mode> <subject_id>
+rosrun prime_ros start_trial.py <mode> <subject_id> <difficulty>
 # e.g.
-rosrun prime_ros start_trial.py manual s1
-rosrun prime_ros start_trial.py assistive s2 --reason participant_ready
+rosrun prime_ros start_trial.py manual s1 easy
+rosrun prime_ros start_trial.py assistive s2 hard --reason participant_ready
 ```
 
 Or call the service directly:
 
 ```bash
-rosservice call /prime/trial_logger/start "{mode: 'manual', subject_id: 's1', reason: 'trial_start'}"
+rosservice call /prime/trial_logger/start "{mode: 'manual', subject_id: 's1', difficulty: 'easy', reason: 'trial_start'}"
 ```
 
 **Stop** (writes summary and closes files):
@@ -171,10 +171,11 @@ Do **not** rely on terminating `roslaunch` to stop cleanly; use the stop service
 Stop current trial, home the arm, then start a new trial with optional mode/subject:
 
 ```bash
-rosrun prime_ros reset_trial.py _mode:=manual _sub:=s1
+rosrun prime_ros reset_trial.py _mode:=manual _sub:=s1 _difficulty:=easy
 ```
 
-Mode and subject for the *new* trial come from private params `_mode` and `_sub` (or `_subject_id`).
+Mode/subject/difficulty for the *new* trial come from private params
+`_mode`, `_sub` (or `_subject_id`), and `_difficulty` (or `_task_difficulty`).
 
 ### Success label (optional)
 
@@ -188,7 +189,7 @@ roslaunch prime_ros prime.launch trial_success_label:=cup
 
 | Service | Type | Description |
 |--------|------|-------------|
-| `/prime/trial_logger/start` | `prime_ros/StartTrial` | Start a new trial (args: `mode`, `subject_id`, `reason`) |
+| `/prime/trial_logger/start` | `prime_ros/StartTrial` | Start a new trial (args: `mode`, `subject_id`, `difficulty`, `reason`) |
 | `/prime/trial_logger/stop` | `std_srvs/Trigger` | End current trial and write summary |
 | `/prime/trial_logger/reset` | `std_srvs/Trigger` | End current trial and start a new one (same mode/subject as last start) |
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Start PRIME trial logging with mode/subject in one short command.
+Start PRIME trial logging with mode/subject/difficulty in one short command.
 
 Examples:
-  rosrun prime_ros start_trial.py manual s1
-  rosrun prime_ros start_trial.py assistive s2 --reason trial_start
+  rosrun prime_ros start_trial.py manual s1 easy
+  rosrun prime_ros start_trial.py assistive s2 hard --reason trial_start
 """
 
 import argparse
@@ -18,6 +18,12 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Start PRIME trial logger.")
     parser.add_argument("mode", help="Trial mode, e.g. manual or assistive")
     parser.add_argument("subject_id", help="Subject ID, e.g. s1")
+    parser.add_argument(
+        "difficulty",
+        nargs="?",
+        default="",
+        help="Task difficulty, e.g. easy or hard (optional)",
+    )
     parser.add_argument(
         "--reason",
         default="manual_start",
@@ -49,7 +55,12 @@ def main():
 
     try:
         srv = rospy.ServiceProxy(args.service, StartTrial)
-        resp = srv(mode=args.mode, subject_id=args.subject_id, reason=args.reason)
+        resp = srv(
+            mode=args.mode,
+            subject_id=args.subject_id,
+            difficulty=args.difficulty,
+            reason=args.reason,
+        )
     except Exception as exc:
         rospy.logerr("start_trial: failed calling %s: %s", args.service, exc)
         return 1
