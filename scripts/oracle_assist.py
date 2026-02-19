@@ -83,6 +83,7 @@ class OracleState:
     awaiting_intent_gate: bool = False
     awaiting_anything_else: bool = False
     awaiting_mode_select: bool = False
+    choice_use_all_objects: bool = False
     last_prompt_context: Optional[Dict] = None
     last_declined_obj_id: Optional[str] = None
     last_tool_calls: List[str] = field(default_factory=list)
@@ -363,6 +364,7 @@ def oracle_decide_tool(
             state.awaiting_intent_gate = False
             state.awaiting_anything_else = False
             state.awaiting_mode_select = False
+            state.choice_use_all_objects = False
 
         if state.pending_mode == "APPROACH":
             tool = _tool("APPROACH", {"obj": target["id"]})
@@ -408,7 +410,15 @@ def oracle_decide_tool(
         return _interact("SUGGESTION", text, choices, context, state)
 
     if state.awaiting_choice:
-        ranked = _dedup_by_label(_rank_candidates(objects, candidates, current_cell))
+        if state.choice_use_all_objects:
+            choice_ids = [
+                o["id"]
+                for o in objects
+                if (not o.get("is_held", False)) and (o["id"] not in excluded_obj_ids)
+            ]
+        else:
+            choice_ids = list(candidates)
+        ranked = _dedup_by_label(_rank_candidates(objects, choice_ids, current_cell))
         if ranked:
             k = min(4, len(ranked))
             labels = [ranked[i]["label"] for i in range(k)]
@@ -427,6 +437,7 @@ def oracle_decide_tool(
                 prompt = "Which one do you want?"
             return _interact("QUESTION", prompt, choices, context, state)
         state.awaiting_choice = False
+        state.choice_use_all_objects = False
         state.awaiting_anything_else = True
         text = "Okay — none of those. Is there anything else I can help with?"
         choices = ["1) YES", "2) NO"]
@@ -642,6 +653,7 @@ def apply_oracle_user_reply(user_content: str, objects: Sequence[Dict], memory: 
         state.awaiting_intent_gate = False
         state.awaiting_anything_else = False
         state.awaiting_mode_select = False
+        state.choice_use_all_objects = False
         state.terminate_episode = False
         state.last_prompt_context = None
 
@@ -665,6 +677,7 @@ def apply_oracle_user_reply(user_content: str, objects: Sequence[Dict], memory: 
         if user_content.upper() == "YES":
             state.awaiting_choice = True
             state.awaiting_intent_gate = False
+            state.choice_use_all_objects = False
             action = str(ctx.get("action") or "APPROACH").upper()
             state.pending_mode = action if action in {"APPROACH", "ALIGN_YAW"} else "APPROACH"
         else:
@@ -702,6 +715,9 @@ def apply_oracle_user_reply(user_content: str, objects: Sequence[Dict], memory: 
             state.selected_obj_id = None
             state.awaiting_choice = True
             state.awaiting_confirmation = False
+            # After "none", broaden the next list to all currently detected objects,
+            # still excluding anything already rejected.
+            state.choice_use_all_objects = True
         elif content_clean in labels or content_clean in display_labels:
             # Match raw or pretty label
             match_label = content_clean
@@ -711,6 +727,7 @@ def apply_oracle_user_reply(user_content: str, objects: Sequence[Dict], memory: 
             set_selected_by_label(match_label)
             state.awaiting_choice = False
             state.awaiting_confirmation = False
+            state.choice_use_all_objects = False
         elif content_clean.isdigit():
             idx = int(content_clean) - 1
             if int(content_clean) == none_index:
@@ -721,11 +738,13 @@ def apply_oracle_user_reply(user_content: str, objects: Sequence[Dict], memory: 
                 state.selected_obj_id = None
                 state.awaiting_choice = True
                 state.awaiting_confirmation = False
+                state.choice_use_all_objects = True
             else:
                 if 0 <= idx < len(labels):
                     set_selected_by_label(labels[idx])
                 state.awaiting_choice = False
                 state.awaiting_confirmation = False
+                state.choice_use_all_objects = False
     elif t == "confirm":
         obj_id = ctx.get("obj_id")
         action = str(ctx.get("action") or "").upper()
@@ -739,6 +758,7 @@ def apply_oracle_user_reply(user_content: str, objects: Sequence[Dict], memory: 
             state.pending_mode = None
             state.selected_obj_id = None
             state.awaiting_anything_else = True
+        state.choice_use_all_objects = False
         state.awaiting_confirmation = False
     elif t == "help":
         obj_id = ctx.get("obj_id")
@@ -751,6 +771,7 @@ def apply_oracle_user_reply(user_content: str, objects: Sequence[Dict], memory: 
             state.pending_mode = None
             state.selected_obj_id = None
             state.awaiting_anything_else = True
+        state.choice_use_all_objects = False
         state.awaiting_help = False
     elif t == "anything_else":
         if user_content.upper() == "YES":
@@ -775,6 +796,7 @@ def apply_oracle_user_reply(user_content: str, objects: Sequence[Dict], memory: 
             state.pending_mode = "ALIGN_YAW"
         state.awaiting_mode_select = False
         state.awaiting_choice = True
+        state.choice_use_all_objects = True
     elif t == "terminal_ack":
         reset_conversation_only()
         auto_continue = False
