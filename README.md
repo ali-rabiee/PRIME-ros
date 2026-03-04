@@ -93,6 +93,18 @@ Launch arguments (examples):
 - `robot_type:=j2n6s300`
 - `yolo_model:=yolo26` or `yolov8`
 - `color_width`, `color_height`, `color_fps` (RealSense)
+- `yolo_conf_threshold` (default `0.25`)
+- `yolo_iou_threshold` (default `0.45`)
+- `yolo_agnostic_nms` (default `false`)
+- `yolo_max_det` (default `100`)
+
+Example duplicate-box suppression tuning:
+```bash
+roslaunch prime_ros prime_full.launch \
+  yolo_conf_threshold:=0.4 \
+  yolo_iou_threshold:=0.35 \
+  yolo_agnostic_nms:=true
+```
 
 ### PRIME only (robot and perception already running)
 
