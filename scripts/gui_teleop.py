@@ -669,7 +669,7 @@ class GuiTeleopNode:
         if self.oracle_enabled_requested:
             self.oracle_panel = tk.LabelFrame(
                 right_panel,
-                text="Oracle Assist",
+                text="PRIME Assist",
                 padx=12,
                 pady=12,
                 bg=bg_panel,
@@ -684,7 +684,7 @@ class GuiTeleopNode:
             elif not PRIME_MSGS_AVAILABLE:
                 status = "Oracle unavailable (PRIME msgs not built)."
             else:
-                status = "Oracle ready. Press 'Ask assistance'."
+                status = "PRIME ready. Press 'Ask assistance'."
             self.oracle_status_var = tk.StringVar(value=status)
             tk.Label(
                 self.oracle_panel,
@@ -720,7 +720,7 @@ class GuiTeleopNode:
             )
             reset_btn = tk.Button(
                 btn_row,
-                text="Reset Oracle",
+                text="Reset PRIME",
                 width=14,
                 height=2,
                 font=("Helvetica", 16, "bold"),
